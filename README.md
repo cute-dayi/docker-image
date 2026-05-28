@@ -12,7 +12,7 @@ docker build -t docker-image:local .
 
 ## Run
 
-Because the image starts systemd as PID 1, run it with cgroup mounted and the privileges systemd needs:
+Because the image starts systemd as PID 1, run it with cgroup mounted and the privileges systemd needs. Do not also enable Docker's `--init` flag for this container.
 
 ```bash
 docker run -d \
@@ -44,6 +44,8 @@ docker run -d \
   docker-image:local
 ```
 
+For Docker Compose, do not set `init: true`; systemd must be the container's PID 1.
+
 To keep an existing `/root/.ssh/authorized_keys` instead of downloading from GitHub, set `GITHUB_USER` to an empty value and mount or bake your own keys:
 
 ```bash
@@ -56,6 +58,8 @@ docker run -d \
   -p 2222:22 \
   docker-image:local
 ```
+
+If GitHub key download fails because DNS or network access is unavailable, the container logs a warning and keeps starting. Mount or bake `/root/.ssh/authorized_keys` if SSH access must work without outbound GitHub access.
 
 GitHub `.keys` URLs expose public SSH keys only. Do not put private keys or personal access tokens in environment variables, image layers, or committed files.
 

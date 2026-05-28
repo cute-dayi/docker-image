@@ -25,6 +25,10 @@ fi
 
 # --- 2. 下载 GitHub SSH 公钥 ---
 mkdir -p /root/.ssh
+had_authorized_keys=0
+if [ -s /root/.ssh/authorized_keys ]; then
+    had_authorized_keys=1
+fi
 
 if [ -n "${GITHUB_USER:-}" ]; then
     if [[ ! "$GITHUB_USER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]; then
@@ -39,8 +43,12 @@ if [ -n "${GITHUB_USER:-}" ]; then
         echo -e "${GREEN}[Entrypoint] GitHub SSH keys installed.${NC}"
     else
         rm -f "$tmp_keys"
-        echo "[Entrypoint] Failed to download non-empty GitHub SSH keys for ${GITHUB_USER}." >&2
-        exit 1
+        if [ "$had_authorized_keys" -eq 1 ]; then
+            echo "[Entrypoint] Failed to download non-empty GitHub SSH keys for ${GITHUB_USER}; keeping existing authorized_keys." >&2
+        else
+            echo "[Entrypoint] Failed to download non-empty GitHub SSH keys for ${GITHUB_USER}; continuing without authorized_keys." >&2
+            touch /root/.ssh/authorized_keys
+        fi
     fi
 else
     echo -e "${GREEN}[Entrypoint] GITHUB_USER is empty. Keeping existing authorized_keys.${NC}"
@@ -63,4 +71,9 @@ mkdir -p /var/run/sshd
 echo -e "${GREEN}[Entrypoint] Initialization done. Executing command: $@${NC}"
 
 # --- 6. 执行主命令 ---
+if [ "$#" -gt 0 ] && [ "$1" = "/lib/systemd/systemd" ] && [ "$$" -ne 1 ]; then
+    echo "[Entrypoint] systemd must run as PID 1. Remove Docker Compose 'init: true' or Docker '--init' for this container." >&2
+    exit 1
+fi
+
 exec "$@"

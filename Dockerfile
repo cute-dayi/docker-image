@@ -5,6 +5,7 @@ ARG DEBIAN_MIRROR=mirrors.ustc.edu.cn
 
 # --- 环境变量 ---
 ENV DEBIAN_FRONTEND=noninteractive \
+    container=docker \
     TZ=Asia/Shanghai \
     LANG=C.UTF-8 \
     GITHUB_USER=rabbit-dayi \
@@ -88,4 +89,4 @@ STOPSIGNAL SIGRTMIN+3
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
-CMD ["/sbin/init"]
+CMD ["/lib/systemd/systemd"]
