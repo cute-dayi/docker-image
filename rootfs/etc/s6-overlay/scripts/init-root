@@ -1,0 +1,56 @@
+#!/bin/bash
+set -e
+
+GREEN='\033[0;32m'
+NC='\033[0m'
+BACKUP_FILE="/usr/share/root_backup.tar.gz"
+
+echo -e "${GREEN}[init-root] Starting initialization...${NC}"
+
+if [ ! -f "/root/.bashrc" ]; then
+    echo -e "${GREEN}[init-root] /root appears empty or mounted. Restoring from backup...${NC}"
+    tar -xzf "$BACKUP_FILE" -C / --keep-newer-files 2>/dev/null || true
+    echo -e "${GREEN}[init-root] Restore complete.${NC}"
+else
+    echo -e "${GREEN}[init-root] /root contains data. Skipping restore.${NC}"
+fi
+
+mkdir -p /root/.ssh
+had_authorized_keys=0
+if [ -s /root/.ssh/authorized_keys ]; then
+    had_authorized_keys=1
+fi
+
+if [ -n "${GITHUB_USER:-}" ]; then
+    if [[ ! "$GITHUB_USER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]; then
+        echo "[init-root] Invalid GitHub username: ${GITHUB_USER}" >&2
+        exit 1
+    fi
+
+    echo -e "${GREEN}[init-root] Downloading GitHub SSH keys for ${GITHUB_USER}...${NC}"
+    tmp_keys="$(mktemp)"
+    if curl -fsSL "https://github.com/${GITHUB_USER}.keys" -o "$tmp_keys" && [ -s "$tmp_keys" ]; then
+        mv "$tmp_keys" /root/.ssh/authorized_keys
+        echo -e "${GREEN}[init-root] GitHub SSH keys installed.${NC}"
+    else
+        rm -f "$tmp_keys"
+        if [ "$had_authorized_keys" -eq 1 ]; then
+            echo "[init-root] Failed to download non-empty GitHub SSH keys for ${GITHUB_USER}; keeping existing authorized_keys." >&2
+        else
+            echo "[init-root] Failed to download non-empty GitHub SSH keys for ${GITHUB_USER}; continuing without authorized_keys." >&2
+            touch /root/.ssh/authorized_keys
+        fi
+    fi
+else
+    echo -e "${GREEN}[init-root] GITHUB_USER is empty. Keeping existing authorized_keys.${NC}"
+    touch /root/.ssh/authorized_keys
+fi
+
+chmod 700 /root/.ssh 2>/dev/null || true
+chmod 600 /root/.ssh/authorized_keys 2>/dev/null || true
+chown -R root:root /root 2>/dev/null || true
+
+ssh-keygen -A
+mkdir -p /run/sshd /workspace
+
+echo -e "${GREEN}[init-root] Initialization done.${NC}"

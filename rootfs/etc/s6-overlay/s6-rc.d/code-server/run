@@ -1,0 +1,19 @@
+#!/bin/bash
+set -e
+
+bind_addr="${CODE_SERVER_BIND_ADDR:-0.0.0.0:8080}"
+auth="${CODE_SERVER_AUTH:-password}"
+workdir="${CODE_SERVER_WORKDIR:-/workspace}"
+
+mkdir -p "$workdir"
+
+if [ "$auth" = "password" ] && [ -z "${PASSWORD:-}" ] && [ -z "${HASHED_PASSWORD:-}" ]; then
+    echo "[code-server] CODE_SERVER_AUTH=password requires PASSWORD or HASHED_PASSWORD. Service will stay idle." >&2
+    exec sleep infinity
+fi
+
+exec code-server \
+    --bind-addr "$bind_addr" \
+    --auth "$auth" \
+    --disable-telemetry \
+    "$workdir"
