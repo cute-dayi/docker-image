@@ -1,23 +1,17 @@
 # docker-image
 
-一个面向远程开发的 Debian Docker 镜像，内置：
+一个面向远程开发的 Debian 13 Docker 镜像，支持 `linux/amd64` 和 `linux/arm64`，内置：
 
-- `s6-overlay`：作为容器内的 init / supervisor，负责启动和守护服务
-- `OpenSSH Server`：用于 SSH 登录容器
-- `code-server`：在浏览器里使用 VS Code
+- `s6-overlay`：作为容器内的 init / supervisor，启动和守护服务
+- `OpenSSH Server`：使用公钥登录，并启用协议层 keepalive
+- `code-server`：在浏览器中使用 VS Code
+- `Tailscale`：可选的容器内 tailnet 接入服务
 - `uv`：Python 包管理/运行工具
 - 常用工具：`git`、`curl`、`wget`、`vim`、`tmux`、`ping`、`iproute2`、`net-tools`、`traceroute`、`procps`
 
-镜像启动时会先执行初始化逻辑：
+镜像使用 `/init` 作为 PID 1。启动时会恢复空的 `/root` 卷、更新 GitHub SSH 公钥、生成 SSH host keys，然后由 s6-overlay 分别管理 `sshd`、`code-server` 和可选的 `tailscaled`。
 
-1. 如果 `/root` 是空挂载卷，会从镜像内置备份恢复默认配置。
-2. 根据 `GITHUB_USER` 下载 GitHub 公开 SSH 公钥。
-3. 写入 `/root/.ssh/authorized_keys`。
-4. 修复 SSH 文件权限。
-5. 生成 SSH host keys。
-6. 由 s6-overlay 启动并守护 `sshd` 和 `code-server`。
-
-本镜像不使用 systemd，因此正常使用时不需要 `privileged`、`/sys/fs/cgroup` 或 Docker Compose 的 `init: true`。
+普通 SSH/code-server 模式不需要 `privileged`、systemd、`/sys/fs/cgroup` 或 Compose 的 `init: true`。只有启用 Tailscale 内核网络时才需要 `/dev/net/tun`、`NET_ADMIN` 和 `NET_RAW`。
 
 ## 镜像地址
 
@@ -27,7 +21,7 @@ ghcr.io/rabbit-dayi/docker-image:latest
 
 ## 快速开始
 
-### Docker 运行
+### Docker
 
 ```bash
 docker run -d \
@@ -41,7 +35,7 @@ docker run -d \
   ghcr.io/rabbit-dayi/docker-image:latest
 ```
 
-### Docker Compose 运行
+### Docker Compose
 
 ```yaml
 services:
@@ -63,34 +57,49 @@ volumes:
   docker-image-workspace:
 ```
 
-注意：不要给这个服务配置 `init: true`，也不需要配置 `privileged: true`。
+不要为此服务设置 `init: true`；s6-overlay 提供的 `/init` 必须保持 PID 1。
 
 ## 访问方式
 
 ### SSH
 
-容器内默认允许 root 使用公钥登录，禁用密码登录。
+容器默认允许 root 使用公钥登录，禁用 SSH 密码登录：
 
 ```bash
 ssh root@localhost -p 2222
 ```
 
-默认情况下，容器会下载这个地址里的公开 SSH 公钥：
+服务端默认配置：
+
+```text
+ClientAliveInterval 60
+ClientAliveCountMax 3
+TCPKeepAlive yes
+```
+
+这会周期性发送 SSH 协议层探测，减少 NAT、防火墙、VPN 等中间设备清理空闲连接的概率；它不会因为用户暂时没有输入而主动登出正常客户端。
+
+建议连接端也配置 keepalive：
+
+```sshconfig
+Host docker-image
+    HostName localhost
+    Port 2222
+    User root
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+```
+
+默认会从下面的地址下载公开 SSH 公钥：
 
 ```text
 https://github.com/rabbit-dayi.keys
 ```
 
-如果你要换成自己的 GitHub 公钥：
+使用其他 GitHub 用户时设置：
 
 ```bash
-docker run -d \
-  --name docker-image \
-  -e GITHUB_USER=<github-user> \
-  -e PASSWORD='change-this-password' \
-  -p 2222:22 \
-  -p 8080:8080 \
-  ghcr.io/rabbit-dayi/docker-image:latest
+-e GITHUB_USER=<github-user>
 ```
 
 ### code-server
@@ -101,54 +110,106 @@ docker run -d \
 http://localhost:8080
 ```
 
-默认启用密码认证，密码来自环境变量 `PASSWORD`：
+默认使用 `PASSWORD` 或 `HASHED_PASSWORD` 认证：
 
 ```yaml
 environment:
   PASSWORD: change-this-password
 ```
 
-也可以使用 code-server 支持的 `HASHED_PASSWORD`：
+如果 `CODE_SERVER_AUTH=password` 但没有提供密码，code-server 会保持 idle，不会反复重启刷日志。
+
+## 内置 Tailscale
+
+Tailscale 默认关闭。启用后，容器中的 SSH 和 code-server 可以通过该容器自己的 Tailscale IP 访问；原有端口映射仍可作为本地或故障恢复入口。
+
+### Docker Compose 示例
+
+将 auth key 放在未提交到 Git 的 `.env` 或其他 secret 管理工具中：
+
+```dotenv
+TS_AUTHKEY=tskey-auth-...
+```
 
 ```yaml
-environment:
-  HASHED_PASSWORD: "<hashed-password>"
+services:
+  dev:
+    image: ghcr.io/rabbit-dayi/docker-image:latest
+    environment:
+      GITHUB_USER: rabbit-dayi
+      PASSWORD: change-this-password
+      TS_ENABLE: "true"
+      TS_AUTHKEY: ${TS_AUTHKEY}
+      TS_AUTH_ONCE: "true"
+      TS_HOSTNAME: dev-container
+      TS_ACCEPT_DNS: "false"
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "2222:22"
+      - "8080:8080"
+    volumes:
+      - docker-image-root:/root
+      - docker-image-workspace:/workspace
+      - docker-image-tailscale:/var/lib/tailscale
+    restart: unless-stopped
+
+volumes:
+  docker-image-root:
+  docker-image-workspace:
+  docker-image-tailscale:
+```
+
+不需要 `privileged: true`。`/var/lib/tailscale` 应持久化，否则容器重建后可能在 tailnet 中生成新的节点身份。LocalAPI socket 位于临时目录 `/run/tailscale/tailscaled.sock`，不应持久化。
+
+Tailscale 是附加服务：缺少 auth key、控制面不可达、认证失败、缺少 TUN 或 capabilities 时，SSH 和 code-server 仍会继续运行。可以进入容器后手工检查：
+
+```bash
+docker exec docker-image tailscale \
+  --socket=/run/tailscale/tailscaled.sock status
+```
+
+或手工认证：
+
+```bash
+docker exec -it docker-image tailscale \
+  --socket=/run/tailscale/tailscaled.sock up
 ```
 
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `GITHUB_USER` | `rabbit-dayi` | 启动时下载 `https://github.com/<user>.keys` 并写入 `/root/.ssh/authorized_keys`。 |
+| `GITHUB_USER` | `rabbit-dayi` | 下载 `https://github.com/<user>.keys`；设为空可禁用自动下载。 |
 | `CODE_SERVER_BIND_ADDR` | `0.0.0.0:8080` | code-server 监听地址。 |
-| `CODE_SERVER_AUTH` | `password` | code-server 认证模式。可设为 `password` 或 `none`。 |
-| `PASSWORD` | 未设置 | `CODE_SERVER_AUTH=password` 时使用的明文密码。 |
-| `HASHED_PASSWORD` | 未设置 | code-server 哈希密码，比明文 `PASSWORD` 更适合长期部署。 |
-| `CODE_SERVER_WORKDIR` | `/workspace` | code-server 默认打开的工作目录。 |
+| `CODE_SERVER_AUTH` | `password` | code-server 认证模式：`password` 或 `none`。 |
+| `PASSWORD` | 未设置 | code-server 明文密码。 |
+| `HASHED_PASSWORD` | 未设置 | code-server 哈希密码，适合长期部署。 |
+| `CODE_SERVER_WORKDIR` | `/workspace` | code-server 默认工作目录。 |
+| `TS_ENABLE` | `false` | 设为严格的 `true` 才启用 Tailscale。 |
+| `TS_AUTHKEY` | 未设置 | Tailscale auth key，只应在运行时安全注入。 |
+| `TS_AUTH_ONCE` | `true` | 已有有效持久化登录时不重复使用 auth key。 |
+| `TS_HOSTNAME` | 未设置 | 可选的 tailnet 节点名。 |
+| `TS_ACCEPT_DNS` | `false` | 是否接受 Tailscale DNS 配置。 |
+| `TS_ADVERTISE_TAGS` | 未设置 | 逗号分隔的 tags，例如 `tag:dev,tag:container`。 |
+| `TS_CONFIG_TIMEOUT` | `30` | 等待和配置 Tailscale 的秒数，允许 5–300。 |
 | `TZ` | `Asia/Shanghai` | 容器时区。 |
 | `LANG` | `C.UTF-8` | 容器语言环境。 |
 
+实现不接受任意 `TS_EXTRA_ARGS`，避免 shell 参数拆分和命令注入。需要增加新的 Tailscale 选项时，应在镜像中加入明确、经过校验的环境变量。
+
 ## SSH 公钥行为
 
-### 使用 GitHub 用户名下载公钥
+### 自动下载
 
-默认：
+`GITHUB_USER` 非空时，容器启动会下载对应 GitHub 用户的公开 SSH keys。下载成功且内容非空时原子替换 `authorized_keys`；下载失败时保留已有文件并继续启动。
 
-```bash
--e GITHUB_USER=rabbit-dayi
-```
+### 自己挂载 authorized_keys
 
-容器启动时会请求：
-
-```text
-https://github.com/rabbit-dayi.keys
-```
-
-请求成功且内容非空时，会覆盖 `/root/.ssh/authorized_keys`。
-
-### 禁用自动下载
-
-如果你想自己挂载或预置 `/root/.ssh/authorized_keys`，可以把 `GITHUB_USER` 设为空：
+将 `GITHUB_USER` 设为空，并可只读挂载文件：
 
 ```bash
 docker run -d \
@@ -161,43 +222,21 @@ docker run -d \
   ghcr.io/rabbit-dayi/docker-image:latest
 ```
 
-### 网络失败时的行为
+初始化逻辑不会强制覆盖只读挂载，也不会递归修改整个 `/root` 的属主。
 
-如果容器 DNS 或网络暂时无法访问 GitHub：
+## 数据卷
 
-- 如果已有 `/root/.ssh/authorized_keys`，会保留已有文件。
-- 如果没有已有公钥文件，会创建空文件并继续启动。
-- 容器不会因为 GitHub 公钥下载失败而无限重启。
+推荐的持久化路径：
 
-## 数据卷说明
+| 路径 | 用途 |
+| --- | --- |
+| `/root` | root 用户配置、SSH 配置、code-server 用户数据。 |
+| `/workspace` | 项目代码和默认工作目录。 |
+| `/var/lib/tailscale` | 可选的 Tailscale 节点身份和状态。 |
 
-推荐挂载两个卷：
+新的空 `/root` 卷会自动恢复 `.bashrc`、`.profile` 等默认配置。
 
-```yaml
-volumes:
-  - docker-image-root:/root
-  - docker-image-workspace:/workspace
-```
-
-含义：
-
-- `/root`：保存 root 用户配置、SSH 配置、code-server 用户数据等。
-- `/workspace`：默认工作目录，适合放项目代码。
-
-如果 `/root` 是一个新的空卷，容器会自动从镜像内置备份恢复 `.bashrc`、`.profile` 等默认配置。
-
-## 关于 apt 包持久化
-
-在运行中的容器里执行 `apt install`，安装结果只会保存在当前容器的 writable layer 里。
-
-这意味着：
-
-- 如果只是 `docker restart`，包还在。
-- 如果容器被删除后重新创建，包会丢失。
-- 如果 Compose 因为镜像更新而重建容器，包会丢失。
-- 不建议通过挂载 `/usr`、`/bin`、`/lib`、`/var/lib/dpkg` 等系统目录来“持久化 apt”，这样很容易和镜像升级产生冲突。
-
-更现实的做法是把需要长期存在的系统包写进自己的派生镜像：
+容器内临时执行 `apt install` 只会写入当前容器的 writable layer；容器删除重建后会丢失。长期需要的包应写入派生镜像：
 
 ```dockerfile
 FROM ghcr.io/rabbit-dayi/docker-image:latest
@@ -207,115 +246,79 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 ```
 
-如果只是临时调试，可以直接在运行中的容器里 `apt install`；如果是长期环境，建议做成 Dockerfile。
-
-## 本地构建
+## 本地构建和测试
 
 ```bash
 git clone https://github.com/rabbit-dayi/docker-image.git
 cd docker-image
 docker build -t docker-image:local .
+tests/smoke.sh docker-image:local
 ```
 
-本地运行：
+smoke test 会检查：
 
-```bash
-docker run -d \
-  --name docker-image \
-  -e GITHUB_USER=rabbit-dayi \
-  -e PASSWORD='change-this-password' \
-  -p 2222:22 \
-  -p 8080:8080 \
-  docker-image:local
-```
+- s6、SSH、code-server、uv 和 Tailscale 可执行文件
+- SSH 配置语法和有效的 keepalive/认证设置
+- `/init`、sshd 和 code-server 的实际运行状态
+- 只读 `authorized_keys` 挂载下的真实 SSH 公钥登录
+- Tailscale 默认关闭，以及启用但缺少 TUN 时不会影响主服务
+- runner 提供 `/dev/net/tun` 时，Tailscale daemon、LocalAPI socket 和主服务的实际运行状态
 
-## GitHub Actions 自动构建
+## GitHub Actions
 
-仓库包含 GitHub Actions workflow。
-
-触发条件：
-
-- push 到 `main`
-- push 版本 tag，例如 `v1.0.0`
-- Pull Request
-- 手动触发 workflow
-
-非 PR 构建会发布镜像到 GitHub Container Registry：
+Pull Request 和 push 都会先构建 `linux/amd64` 测试镜像并运行 smoke test。测试通过后再构建 `linux/amd64`、`linux/arm64`；非 PR 构建会发布到：
 
 ```text
 ghcr.io/rabbit-dayi/docker-image:latest
 ```
 
+触发条件包括 push 到 `main`、`v*.*.*` tag、Pull Request 和手动触发。
+
 ## 排障
 
-### 1. code-server 打不开
+### SSH 登录失败
 
-检查容器是否映射了 8080 端口：
+1. 检查 `2222:22` 端口映射。
+2. 检查 `GITHUB_USER` 和 `https://github.com/<user>.keys`。
+3. 检查容器日志：`docker logs docker-image`。
+4. 使用 `GITHUB_USER=` 时，确认挂载的 `authorized_keys` 内容、权限和公钥匹配。
 
-```yaml
-ports:
-  - "8080:8080"
+### SSH 仍然断开
+
+镜像已经配置服务端 SSH keepalive；连接端仍建议配置 `ServerAliveInterval`。如果断开时容器重启、sshd 被杀死、宿主网络变化或发生 OOM，keepalive 无法保留原 TCP 会话。检查：
+
+```bash
+docker inspect docker-image \
+  --format 'running={{.State.Running}} oom={{.State.OOMKilled}} restarts={{.RestartCount}}'
+docker logs --since 10m docker-image
 ```
 
-检查是否设置了密码：
+### code-server 无法访问
 
-```yaml
-environment:
-  PASSWORD: change-this-password
+确认映射了 8080，并设置了 `PASSWORD`/`HASHED_PASSWORD`，或明确使用 `CODE_SERVER_AUTH=none`。
+
+### Tailscale 没有上线
+
+检查：
+
+```bash
+ls -l /dev/net/tun
+docker logs docker-image
+docker exec docker-image tailscale \
+  --socket=/run/tailscale/tailscaled.sock status
 ```
 
-如果 `CODE_SERVER_AUTH=password` 但没有设置 `PASSWORD` 或 `HASHED_PASSWORD`，code-server 服务会保持 idle，不会反复重启刷日志。
+确认设置了 `TS_ENABLE=true`、映射 `/dev/net/tun`、添加 `NET_ADMIN`/`NET_RAW`，并提供有效 auth key。若状态卷已经登录，通常不需要再次提供 key。
 
-### 2. SSH 登录不上
+### DNS 或 GitHub 暂时不可用
 
-检查是否映射了 22 端口：
-
-```yaml
-ports:
-  - "2222:22"
-```
-
-检查 GitHub 用户名是否正确：
-
-```yaml
-environment:
-  GITHUB_USER: rabbit-dayi
-```
-
-检查 GitHub 公钥地址是否能访问：
-
-```text
-https://github.com/<github-user>.keys
-```
-
-### 3. 容器里无法解析 github.com
-
-这是容器网络/DNS 问题。镜像会继续启动，但可能不会更新 SSH 公钥。
-
-可以选择：
-
-- 修复 Docker/Compose 的 DNS 配置。
-- 设置 `GITHUB_USER=`，然后手动挂载 `authorized_keys`。
-- 使用持久化 `/root` 卷，保留上一次成功下载的公钥。
-
-### 4. 不要使用 systemd 参数
-
-这个镜像已经不使用 systemd。不要配置：
-
-```yaml
-privileged: true
-cgroupns: host
-init: true
-volumes:
-  - /sys/fs/cgroup:/sys/fs/cgroup:rw
-```
-
-正常 SSH 和 code-server 不需要这些配置。
+GitHub SSH key 下载和 Tailscale 配置失败都不会让 SSH/code-server 无限重启。可以修复 Docker DNS，或使用持久化 `/root` 及手工挂载的 `authorized_keys`。
 
 ## 安全说明
 
 - GitHub `.keys` 地址只包含公开 SSH 公钥，不是私钥。
-- 不要把 SSH 私钥、GitHub PAT、密码等秘密写进 Dockerfile、README 或镜像层。
-- 如果 GitHub PAT 曾经粘贴到聊天、日志或终端历史里，应立即撤销并重新生成。
-- 如果对外暴露 code-server，请务必设置强密码，或者放在反向代理、VPN、内网、SSH tunnel 后面。
+- 不要把 SSH 私钥、GitHub PAT、密码或 `TS_AUTHKEY` 写入 Dockerfile、README、镜像层或提交到 Git。
+- auth key 应尽量使用一次性、短期、ephemeral 或受 tag 限制的 key；泄露后立即在 Tailscale 管理控制台吊销。
+- 对外暴露 code-server 时应使用强密码，或者通过 Tailscale、反向代理、内网或 SSH tunnel 访问。
 - 不建议在公网直接使用 `CODE_SERVER_AUTH=none`。
+- Tailscale 模式只需要有限 capabilities，不要使用 `privileged: true`。

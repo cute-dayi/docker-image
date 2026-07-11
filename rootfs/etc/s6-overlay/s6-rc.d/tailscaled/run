@@ -1,0 +1,19 @@
+#!/bin/bash
+set -e
+
+if [ "${TS_ENABLE:-false}" != "true" ]; then
+    echo "[tailscaled] Disabled. Set TS_ENABLE=true to enable Tailscale."
+    exec sleep infinity
+fi
+
+mkdir -p /run/tailscale /var/lib/tailscale
+chmod 700 /var/lib/tailscale 2>/dev/null || true
+
+if [ ! -c /dev/net/tun ]; then
+    echo "[tailscaled] /dev/net/tun is unavailable; Tailscale will stay idle." >&2
+    exec sleep infinity
+fi
+
+exec /usr/sbin/tailscaled \
+    --state=/var/lib/tailscale/tailscaled.state \
+    --socket=/run/tailscale/tailscaled.sock

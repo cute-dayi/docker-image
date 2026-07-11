@@ -4,6 +4,7 @@ set -e
 GREEN='\033[0;32m'
 NC='\033[0m'
 BACKUP_FILE="/usr/share/root_backup.tar.gz"
+AUTHORIZED_KEYS=/root/.ssh/authorized_keys
 
 echo -e "${GREEN}[init-root] Starting initialization...${NC}"
 
@@ -17,7 +18,7 @@ fi
 
 mkdir -p /root/.ssh
 had_authorized_keys=0
-if [ -s /root/.ssh/authorized_keys ]; then
+if [ -s "$AUTHORIZED_KEYS" ]; then
     had_authorized_keys=1
 fi
 
@@ -28,29 +29,40 @@ if [ -n "${GITHUB_USER:-}" ]; then
     fi
 
     echo -e "${GREEN}[init-root] Downloading GitHub SSH keys for ${GITHUB_USER}...${NC}"
-    tmp_keys="$(mktemp)"
-    if curl -fsSL "https://github.com/${GITHUB_USER}.keys" -o "$tmp_keys" && [ -s "$tmp_keys" ]; then
-        mv "$tmp_keys" /root/.ssh/authorized_keys
-        echo -e "${GREEN}[init-root] GitHub SSH keys installed.${NC}"
+    tmp_keys="$(mktemp /root/.ssh/authorized_keys.XXXXXX)"
+    if curl -fsSL --connect-timeout 10 --max-time 30 "https://github.com/${GITHUB_USER}.keys" -o "$tmp_keys" && [ -s "$tmp_keys" ]; then
+        chmod 600 "$tmp_keys"
+        if mv -f "$tmp_keys" "$AUTHORIZED_KEYS" 2>/dev/null; then
+            echo -e "${GREEN}[init-root] GitHub SSH keys installed.${NC}"
+        else
+            rm -f "$tmp_keys"
+            echo "[init-root] authorized_keys cannot be replaced; keeping the mounted or existing file." >&2
+        fi
     else
         rm -f "$tmp_keys"
         if [ "$had_authorized_keys" -eq 1 ]; then
             echo "[init-root] Failed to download non-empty GitHub SSH keys for ${GITHUB_USER}; keeping existing authorized_keys." >&2
         else
             echo "[init-root] Failed to download non-empty GitHub SSH keys for ${GITHUB_USER}; continuing without authorized_keys." >&2
-            touch /root/.ssh/authorized_keys
         fi
     fi
 else
     echo -e "${GREEN}[init-root] GITHUB_USER is empty. Keeping existing authorized_keys.${NC}"
-    touch /root/.ssh/authorized_keys
+fi
+
+if [ ! -e "$AUTHORIZED_KEYS" ] && ! touch "$AUTHORIZED_KEYS" 2>/dev/null; then
+    echo "[init-root] Could not create authorized_keys; continuing for mounted configurations." >&2
 fi
 
 chmod 700 /root/.ssh 2>/dev/null || true
-chmod 600 /root/.ssh/authorized_keys 2>/dev/null || true
-chown -R root:root /root 2>/dev/null || true
+chown root:root /root/.ssh 2>/dev/null || true
+if [ -e "$AUTHORIZED_KEYS" ]; then
+    chmod 600 "$AUTHORIZED_KEYS" 2>/dev/null || true
+    chown root:root "$AUTHORIZED_KEYS" 2>/dev/null || true
+fi
 
 ssh-keygen -A
-mkdir -p /run/sshd /workspace
+mkdir -p /run/sshd /run/tailscale /var/lib/tailscale /workspace
+chmod 700 /var/lib/tailscale 2>/dev/null || true
 
 echo -e "${GREEN}[init-root] Initialization done.${NC}"

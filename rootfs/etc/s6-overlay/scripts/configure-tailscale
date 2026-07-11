@@ -1,0 +1,72 @@
+#!/bin/bash
+set -u
+
+socket=/run/tailscale/tailscaled.sock
+
+enabled="${TS_ENABLE:-false}"
+auth_once="${TS_AUTH_ONCE:-true}"
+accept_dns="${TS_ACCEPT_DNS:-false}"
+timeout="${TS_CONFIG_TIMEOUT:-30}"
+
+if [ "$enabled" = "false" ]; then
+    exit 0
+fi
+if [ "$enabled" != "true" ]; then
+    echo "[tailscale-config] TS_ENABLE must be true or false; Tailscale remains disabled." >&2
+    exit 0
+fi
+if [ ! -c /dev/net/tun ]; then
+    echo "[tailscale-config] /dev/net/tun is unavailable; skipping configuration." >&2
+    exit 0
+fi
+for setting in "$auth_once" "$accept_dns"; do
+    if [ "$setting" != "true" ] && [ "$setting" != "false" ]; then
+        echo "[tailscale-config] TS_AUTH_ONCE and TS_ACCEPT_DNS must be true or false." >&2
+        exit 0
+    fi
+done
+if ! [[ "$timeout" =~ ^[0-9]+$ ]] || [ "$timeout" -lt 5 ] || [ "$timeout" -gt 300 ]; then
+    echo "[tailscale-config] TS_CONFIG_TIMEOUT must be between 5 and 300 seconds." >&2
+    exit 0
+fi
+if [ -n "${TS_HOSTNAME:-}" ] && ! [[ "$TS_HOSTNAME" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]{0,61}[A-Za-z0-9])?$ ]]; then
+    echo "[tailscale-config] TS_HOSTNAME is invalid." >&2
+    exit 0
+fi
+if [ -n "${TS_ADVERTISE_TAGS:-}" ] && ! [[ "$TS_ADVERTISE_TAGS" =~ ^tag:[A-Za-z0-9-]+(,tag:[A-Za-z0-9-]+)*$ ]]; then
+    echo "[tailscale-config] TS_ADVERTISE_TAGS must be a comma-separated list of tag:name values." >&2
+    exit 0
+fi
+
+for ((elapsed=0; elapsed<timeout; elapsed++)); do
+    if /usr/bin/tailscale --socket="$socket" status --json >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+if ! /usr/bin/tailscale --socket="$socket" status --json >/dev/null 2>&1; then
+    echo "[tailscale-config] tailscaled did not become ready within ${timeout}s; other services remain available." >&2
+    exit 0
+fi
+
+status_json="$(/usr/bin/tailscale --socket="$socket" status --json 2>/dev/null || true)"
+if [ "$auth_once" = "true" ] && grep -q '"BackendState"[[:space:]]*:[[:space:]]*"Running"' <<<"$status_json"; then
+    echo "[tailscale-config] Existing Tailscale login is active."
+    exit 0
+fi
+if [ -z "${TS_AUTHKEY:-}" ]; then
+    echo "[tailscale-config] No TS_AUTHKEY supplied; authenticate manually if needed."
+    exit 0
+fi
+
+args=(--socket="$socket" up --auth-key="$TS_AUTHKEY" --accept-dns="$accept_dns")
+[ -n "${TS_HOSTNAME:-}" ] && args+=(--hostname="$TS_HOSTNAME")
+[ -n "${TS_ADVERTISE_TAGS:-}" ] && args+=(--advertise-tags="$TS_ADVERTISE_TAGS")
+unset TS_AUTHKEY
+
+if timeout "${timeout}s" /usr/bin/tailscale "${args[@]}" >/dev/null; then
+    echo "[tailscale-config] Tailscale configured."
+else
+    echo "[tailscale-config] Authentication/configuration failed; other services remain available." >&2
+fi
+exit 0
