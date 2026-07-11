@@ -38,6 +38,8 @@ assert_config '^permitrootlogin (without-password|prohibit-password)$'
 ssh-keygen -q -t ed25519 -N '' -f "$tmpdir/id_ed25519"
 cp "$tmpdir/id_ed25519.pub" "$tmpdir/authorized_keys"
 chmod 444 "$tmpdir/authorized_keys"
+# GitHub-hosted runners bind-mount files as the runner user, not root.
+chown 1001:1001 "$tmpdir/authorized_keys"
 original_keys="$(sha256sum "$tmpdir/authorized_keys")"
 
 docker run -d \

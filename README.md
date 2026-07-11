@@ -222,7 +222,7 @@ docker run -d \
   ghcr.io/rabbit-dayi/docker-image:latest
 ```
 
-初始化逻辑不会强制覆盖只读挂载，也不会递归修改整个 `/root` 的属主。
+初始化逻辑不会强制覆盖只读挂载，也不会递归修改整个 `/root` 的属主。启动时会将该文件复制到 root 拥有的临时 SSH key 文件，因此宿主机挂载文件属于非 root 用户时，SSH 公钥登录同样可用。
 
 ## 数据卷
 

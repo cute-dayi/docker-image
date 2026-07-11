@@ -5,6 +5,7 @@ GREEN='\033[0;32m'
 NC='\033[0m'
 BACKUP_FILE="/usr/share/root_backup.tar.gz"
 AUTHORIZED_KEYS=/root/.ssh/authorized_keys
+RUNTIME_AUTHORIZED_KEYS=/run/sshd/authorized_keys
 
 echo -e "${GREEN}[init-root] Starting initialization...${NC}"
 
@@ -63,6 +64,11 @@ fi
 
 ssh-keygen -A
 mkdir -p /run/sshd /run/tailscale /var/lib/tailscale /workspace
+if [ -r "$AUTHORIZED_KEYS" ]; then
+    install -m 600 -o root -g root "$AUTHORIZED_KEYS" "$RUNTIME_AUTHORIZED_KEYS"
+else
+    install -m 600 -o root -g root /dev/null "$RUNTIME_AUTHORIZED_KEYS"
+fi
 chmod 700 /var/lib/tailscale 2>/dev/null || true
 
 echo -e "${GREEN}[init-root] Initialization done.${NC}"
