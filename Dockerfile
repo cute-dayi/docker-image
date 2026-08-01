@@ -14,8 +14,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_COMPILE_BYTECODE=1 \
     S6_KEEP_ENV=1 \
     S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
-    CODE_SERVER_BIND_ADDR=0.0.0.0:8080 \
+    CODE_SERVER_BIND_ADDR=127.0.0.1:8080 \
     CODE_SERVER_WORKDIR=/workspace \
+    NGINX_ENABLE=true \
+    NGINX_HTTP_PORT=80 \
+    NGINX_HTTPS_PORT=443 \
+    NGINX_HTTP_REDIRECT=true \
+    NGINX_SERVER_NAMES=_ \
+    NGINX_UPSTREAM=127.0.0.1:8080 \
     TS_ENABLE=false \
     TS_AUTH_ONCE=true \
     TS_ACCEPT_DNS=false \
@@ -40,7 +46,7 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
       openssh-server git curl wget vim ca-certificates tzdata tmux xz-utils \
       inetutils-ping iproute2 net-tools traceroute procps \
-      fuse-overlayfs slirp4netns uidmap; \
+      fuse-overlayfs slirp4netns uidmap nginx-light openssl; \
     install -m 0755 -d /etc/apt/keyrings; \
     curl -fsSL --retry 3 --retry-all-errors \
       https://download.docker.com/linux/debian/gpg \
@@ -98,6 +104,7 @@ RUN set -eux; \
     rm -f /tmp/code-server.deb; \
     rm -rf /var/lib/apt/lists/*; \
     mkdir -p /run/sshd /run/tailscale /run/user /var/lib/tailscale /root/.ssh /workspace; \
+    install -d -m 0755 /etc/nginx/certs; \
     install -d -m 0700 -o dockerd -g dockerd \
       /run/user/1000 /home/dockerd/.local/share/docker; \
     touch /root/.ssh/authorized_keys; \
@@ -123,15 +130,18 @@ COPY rootfs/ /
 RUN set -eux; \
     chmod +x \
       /etc/s6-overlay/scripts/init-root \
+      /etc/s6-overlay/scripts/configure-nginx \
       /etc/s6-overlay/scripts/configure-tailscale \
       /etc/s6-overlay/s6-rc.d/sshd/run \
       /etc/s6-overlay/s6-rc.d/code-server/run \
       /etc/s6-overlay/s6-rc.d/dockerd-rootless/run \
+      /etc/s6-overlay/s6-rc.d/nginx/run \
       /etc/s6-overlay/s6-rc.d/tailscaled/run; \
-    /usr/sbin/sshd -t
+    /usr/sbin/sshd -t; \
+    /usr/sbin/nginx -t
 
 WORKDIR /workspace
 
-EXPOSE 22 8080
+EXPOSE 22 80 443
 
 ENTRYPOINT ["/init"]

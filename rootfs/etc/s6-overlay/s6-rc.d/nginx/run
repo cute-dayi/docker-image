@@ -1,0 +1,9 @@
+#!/bin/bash
+set -euo pipefail
+
+if [ "${NGINX_ENABLE:-true}" != "true" ]; then
+    echo "[nginx] Disabled. Set NGINX_ENABLE=true to enable the HTTPS entrypoint."
+    exec sleep infinity
+fi
+
+exec /usr/sbin/nginx -c /run/nginx/nginx.conf -g 'daemon off;'

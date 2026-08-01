@@ -1,0 +1,209 @@
+#!/bin/bash
+set -euo pipefail
+
+fail() {
+    echo "[nginx-config] $*" >&2
+    exit 1
+}
+
+validate_port() {
+    local value=$1
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    ((10#$value >= 1 && 10#$value <= 65535))
+}
+
+validate_path() {
+    [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$1" != *//* ]]
+}
+
+enabled="${NGINX_ENABLE:-true}"
+case "$enabled" in
+    true) ;;
+    false)
+        echo "[nginx-config] Disabled."
+        exit 0
+        ;;
+    *) fail "NGINX_ENABLE must be true or false." ;;
+esac
+
+http_redirect="${NGINX_HTTP_REDIRECT:-true}"
+case "$http_redirect" in
+    true|false) ;;
+    *) fail "NGINX_HTTP_REDIRECT must be true or false." ;;
+esac
+
+http_port="${NGINX_HTTP_PORT:-80}"
+https_port="${NGINX_HTTPS_PORT:-443}"
+validate_port "$http_port" || fail "NGINX_HTTP_PORT must be between 1 and 65535."
+validate_port "$https_port" || fail "NGINX_HTTPS_PORT must be between 1 and 65535."
+http_port=$((10#$http_port))
+https_port=$((10#$https_port))
+[ "$http_port" != "$https_port" ] || fail "NGINX_HTTP_PORT and NGINX_HTTPS_PORT must differ."
+
+upstream="${NGINX_UPSTREAM:-127.0.0.1:8080}"
+upstream_host="${upstream%:*}"
+upstream_port="${upstream##*:}"
+[[ "$upstream" == *:* ]] \
+    && [[ "$upstream_host" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] \
+    && validate_port "$upstream_port" \
+    || fail "NGINX_UPSTREAM must be a safe host:port value."
+upstream_port=$((10#$upstream_port))
+upstream="${upstream_host}:${upstream_port}"
+
+requested_names="${NGINX_SERVER_NAMES:-_}"
+server_names=""
+certificate_sans=""
+certificate_cn=""
+if [ "$requested_names" = "_" ]; then
+    server_names="_"
+    certificate_cn="localhost"
+    certificate_sans="DNS:localhost,IP:127.0.0.1"
+else
+    [[ "$requested_names" != ,* ]] \
+        && [[ "$requested_names" != *, ]] \
+        && [[ "$requested_names" != *,,* ]] \
+        || fail "NGINX_SERVER_NAMES must be a comma-separated domain list."
+    IFS=',' read -r -a names <<<"$requested_names"
+    for name in "${names[@]}"; do
+        name="${name,,}"
+        [[ "$name" =~ ^(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]] \
+            || fail "Invalid domain in NGINX_SERVER_NAMES: $name"
+        server_names+="${server_names:+ }${name}"
+        certificate_sans+="${certificate_sans:+,}DNS:${name}"
+        [ -n "$certificate_cn" ] || certificate_cn="$name"
+    done
+fi
+
+runtime_dir=/run/nginx
+config_file="${runtime_dir}/nginx.conf"
+default_cert_dir="${runtime_dir}/default-certificate"
+default_cert="${default_cert_dir}/tls.crt"
+default_key="${default_cert_dir}/tls.key"
+mounted_cert=/etc/nginx/certs/tls.crt
+mounted_key=/etc/nginx/certs/tls.key
+
+cert_file=""
+key_file=""
+if [ -n "${NGINX_TLS_CERT_FILE+x}" ] || [ -n "${NGINX_TLS_KEY_FILE+x}" ]; then
+    [ -n "${NGINX_TLS_CERT_FILE:-}" ] && [ -n "${NGINX_TLS_KEY_FILE:-}" ] \
+        || fail "Set both NGINX_TLS_CERT_FILE and NGINX_TLS_KEY_FILE."
+    cert_file="$NGINX_TLS_CERT_FILE"
+    key_file="$NGINX_TLS_KEY_FILE"
+elif [ -e "$mounted_cert" ] || [ -e "$mounted_key" ]; then
+    cert_file="$mounted_cert"
+    key_file="$mounted_key"
+else
+    install -d -m 0755 "$runtime_dir"
+    install -d -m 0700 "$default_cert_dir"
+    umask 077
+    openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 3650 \
+        -keyout "$default_key" \
+        -out "$default_cert" \
+        -subj "/CN=${certificate_cn}" \
+        -addext "subjectAltName=${certificate_sans}" \
+        >/dev/null 2>&1 \
+        || fail "Could not generate the default self-signed certificate."
+    cert_file="$default_cert"
+    key_file="$default_key"
+    echo "[nginx-config] Generated a default self-signed certificate for ${certificate_cn}."
+fi
+
+validate_path "$cert_file" && validate_path "$key_file" \
+    || fail "TLS certificate paths must be absolute safe paths."
+[ -r "$cert_file" ] && [ -r "$key_file" ] \
+    || fail "TLS certificate or key is not readable."
+openssl x509 -in "$cert_file" -noout >/dev/null 2>&1 \
+    || fail "NGINX_TLS_CERT_FILE is not a readable X.509 certificate."
+openssl pkey -in "$key_file" -noout >/dev/null 2>&1 \
+    || fail "NGINX_TLS_KEY_FILE is not a readable private key."
+
+install -d -m 0755 "$runtime_dir"
+redirect_authority='$host'
+if [ "$https_port" != 443 ]; then
+    redirect_authority="\$host:${https_port}"
+fi
+
+cat >"$config_file" <<EOF
+user www-data;
+worker_processes auto;
+pid /run/nginx/nginx.pid;
+error_log /dev/stderr notice;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    access_log /dev/stdout;
+    sendfile on;
+    keepalive_timeout 65;
+    client_max_body_size 0;
+
+    map \$http_upgrade \$connection_upgrade {
+        default upgrade;
+        '' close;
+    }
+
+    server {
+        listen ${http_port};
+        server_name ${server_names};
+EOF
+
+if [ "$http_redirect" = "true" ]; then
+    printf '        return 308 https://%s$request_uri;\n' "$redirect_authority" >>"$config_file"
+else
+    cat >>"$config_file" <<EOF
+        location / {
+            proxy_pass http://${upstream};
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Host \$host;
+            proxy_set_header X-Forwarded-Proto http;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \$connection_upgrade;
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+EOF
+fi
+
+cat >>"$config_file" <<EOF
+    }
+
+    server {
+        listen ${https_port} ssl;
+        http2 on;
+        server_name ${server_names};
+
+        ssl_certificate ${cert_file};
+        ssl_certificate_key ${key_file};
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_cache shared:TLS:10m;
+        ssl_session_timeout 10m;
+
+        location / {
+            proxy_pass http://${upstream};
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Host \$host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \$connection_upgrade;
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+    }
+}
+EOF
+
+/usr/sbin/nginx -t -q -c "$config_file" \
+    || fail "Generated Nginx configuration is invalid."
+echo "[nginx-config] HTTPS entrypoint configured for ${server_names}; upstream=${upstream}."
