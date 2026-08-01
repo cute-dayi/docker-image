@@ -46,6 +46,7 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
       openssh-server git curl wget vim ca-certificates tzdata tmux xz-utils \
       inetutils-ping iproute2 net-tools traceroute procps \
+      htop jq lsof ncdu tree dnsutils mtr-tiny tcpdump rsync socat psmisc strace \
       fuse-overlayfs slirp4netns uidmap nginx-light openssl; \
     install -m 0755 -d /etc/apt/keyrings; \
     curl -fsSL --retry 3 --retry-all-errors \
