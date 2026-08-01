@@ -63,12 +63,19 @@ if [ -e "$AUTHORIZED_KEYS" ]; then
 fi
 
 ssh-keygen -A
-mkdir -p /run/sshd /run/tailscale /var/lib/tailscale /workspace
+mkdir -p /run/sshd /run/tailscale /run/user /var/lib/tailscale /workspace
 if [ -r "$AUTHORIZED_KEYS" ]; then
     install -m 600 -o root -g root "$AUTHORIZED_KEYS" "$RUNTIME_AUTHORIZED_KEYS"
 else
     install -m 600 -o root -g root /dev/null "$RUNTIME_AUTHORIZED_KEYS"
 fi
 chmod 700 /var/lib/tailscale 2>/dev/null || true
+
+if id dockerd >/dev/null 2>&1; then
+    docker_uid="$(id -u dockerd)"
+    install -d -m 0700 -o dockerd -g dockerd \
+        "/run/user/${docker_uid}" \
+        /home/dockerd/.local/share/docker
+fi
 
 echo -e "${GREEN}[init-root] Initialization done.${NC}"

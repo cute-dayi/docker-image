@@ -19,7 +19,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TS_ENABLE=false \
     TS_AUTH_ONCE=true \
     TS_ACCEPT_DNS=false \
-    TS_CONFIG_TIMEOUT=30
+    TS_CONFIG_TIMEOUT=30 \
+    DOCKERD_ROOTLESS_ENABLE=false \
+    DOCKER_HOST=unix:///run/user/1000/docker.sock
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -37,7 +39,22 @@ RUN set -eux; \
     apt-get -y upgrade; \
     apt-get install -y --no-install-recommends \
       openssh-server git curl wget vim ca-certificates tzdata tmux xz-utils \
-      inetutils-ping iproute2 net-tools traceroute procps; \
+      inetutils-ping iproute2 net-tools traceroute procps \
+      fuse-overlayfs slirp4netns uidmap; \
+    install -m 0755 -d /etc/apt/keyrings; \
+    curl -fsSL --retry 3 --retry-all-errors \
+      https://download.docker.com/linux/debian/gpg \
+      -o /etc/apt/keyrings/docker.asc; \
+    chmod a+r /etc/apt/keyrings/docker.asc; \
+    . /etc/os-release; \
+    printf '%s\n' \
+      'Types: deb' \
+      'URIs: https://download.docker.com/linux/debian' \
+      "Suites: ${VERSION_CODENAME}" \
+      'Components: stable' \
+      "Architectures: $(dpkg --print-architecture)" \
+      'Signed-By: /etc/apt/keyrings/docker.asc' \
+      > /etc/apt/sources.list.d/docker.sources; \
     curl -fsSL --retry 3 --retry-all-errors \
       https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg \
       -o /usr/share/keyrings/tailscale-archive-keyring.gpg; \
@@ -45,8 +62,14 @@ RUN set -eux; \
       https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list \
       -o /etc/apt/sources.list.d/tailscale.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends "tailscale=${TAILSCALE_VERSION}"; \
+    apt-get install -y --no-install-recommends \
+      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
+      docker-ce-rootless-extras "tailscale=${TAILSCALE_VERSION}"; \
     rm -rf /var/lib/apt/lists/*; \
+    groupadd --gid 1000 dockerd; \
+    useradd --uid 1000 --gid dockerd --create-home --shell /usr/sbin/nologin dockerd; \
+    printf '%s\n' 'dockerd:100000:65536' >> /etc/subuid; \
+    printf '%s\n' 'dockerd:100000:65536' >> /etc/subgid; \
     ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime; \
     dpkg-reconfigure -f noninteractive tzdata; \
     case "${TARGETARCH:-amd64}" in \
@@ -74,7 +97,9 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends /tmp/code-server.deb; \
     rm -f /tmp/code-server.deb; \
     rm -rf /var/lib/apt/lists/*; \
-    mkdir -p /run/sshd /run/tailscale /var/lib/tailscale /root/.ssh /workspace; \
+    mkdir -p /run/sshd /run/tailscale /run/user /var/lib/tailscale /root/.ssh /workspace; \
+    install -d -m 0700 -o dockerd -g dockerd \
+      /run/user/1000 /home/dockerd/.local/share/docker; \
     touch /root/.ssh/authorized_keys; \
     chmod 700 /root/.ssh; \
     chmod 600 /root/.ssh/authorized_keys; \
@@ -87,6 +112,7 @@ RUN set -eux; \
         echo "export LANG=${LANG}"; \
         echo "export UV_LINK_MODE=${UV_LINK_MODE}"; \
         echo "export UV_COMPILE_BYTECODE=${UV_COMPILE_BYTECODE}"; \
+        echo "export DOCKER_HOST=${DOCKER_HOST}"; \
         echo "# UV Auto Completion"; \
         echo 'eval "$(uv generate-shell-completion bash)"'; \
     } >> /root/.bashrc; \
@@ -100,6 +126,7 @@ RUN set -eux; \
       /etc/s6-overlay/scripts/configure-tailscale \
       /etc/s6-overlay/s6-rc.d/sshd/run \
       /etc/s6-overlay/s6-rc.d/code-server/run \
+      /etc/s6-overlay/s6-rc.d/dockerd-rootless/run \
       /etc/s6-overlay/s6-rc.d/tailscaled/run; \
     /usr/sbin/sshd -t
 

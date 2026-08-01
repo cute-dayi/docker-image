@@ -6,12 +6,13 @@
 - `OpenSSH Server`：使用公钥登录，并启用协议层 keepalive
 - `code-server`：在浏览器中使用 VS Code
 - `Tailscale`：可选的容器内 tailnet 接入服务
+- `Docker CLI`、Buildx、Compose plugin，以及可选的 rootless Docker-in-Docker daemon
 - `uv`：Python 包管理/运行工具
 - 常用工具：`git`、`curl`、`wget`、`vim`、`tmux`、`ping`、`iproute2`、`net-tools`、`traceroute`、`procps`
 
-镜像使用 `/init` 作为 PID 1。启动时会恢复空的 `/root` 卷、更新 GitHub SSH 公钥、生成 SSH host keys，然后由 s6-overlay 分别管理 `sshd`、`code-server` 和可选的 `tailscaled`。
+镜像使用 `/init` 作为 PID 1。启动时会恢复空的 `/root` 卷、更新 GitHub SSH 公钥、生成 SSH host keys，然后由 s6-overlay 分别管理 `sshd`、`code-server`、可选的 `tailscaled` 和 rootless `dockerd`。
 
-普通 SSH/code-server 模式不需要 `privileged`、systemd、`/sys/fs/cgroup` 或 Compose 的 `init: true`。只有启用 Tailscale 内核网络时才需要 `/dev/net/tun`、`NET_ADMIN` 和 `NET_RAW`。
+普通 SSH/code-server 模式不需要 `privileged`、systemd、`/sys/fs/cgroup` 或 Compose 的 `init: true`。启用 Tailscale 内核网络时才需要 `/dev/net/tun`、`NET_ADMIN` 和 `NET_RAW`；启用 rootless Docker-in-Docker 时需要外层容器使用 `--privileged`，具体原因和使用方式见下文。
 
 ## 镜像地址
 
@@ -58,6 +59,66 @@ volumes:
 ```
 
 不要为此服务设置 `init: true`；s6-overlay 提供的 `/init` 必须保持 PID 1。
+
+## Rootless Docker-in-Docker
+
+镜像始终内置 Docker CLI、Buildx 和 Compose plugin，但 rootless daemon 默认关闭。要在容器内构建、运行和管理独立的 Docker 容器，显式启用 `DOCKERD_ROOTLESS_ENABLE=true`：
+
+```bash
+docker run -d \
+  --name docker-image-dind \
+  --privileged \
+  -e GITHUB_USER=rabbit-dayi \
+  -e PASSWORD='change-this-password' \
+  -e DOCKERD_ROOTLESS_ENABLE=true \
+  -p 2222:22 \
+  -p 8080:8080 \
+  -v docker-image-root:/root \
+  -v docker-image-workspace:/workspace \
+  -v docker-image-docker:/home/dockerd/.local/share/docker \
+  ghcr.io/rabbit-dayi/docker-image:latest
+```
+
+`dockerd` 以镜像内 UID 1000 的 `dockerd` 用户运行；root 的 SSH、终端和 code-server 已预设 `DOCKER_HOST=unix:///run/user/1000/docker.sock`，进入后可直接执行：
+
+```bash
+docker info
+docker run --rm hello-world
+docker buildx version
+docker compose version
+```
+
+Docker API 默认不监听 TCP 端口，也不需要挂载宿主机的 `/var/run/docker.sock`。镜像中的 Docker 数据位于 `/home/dockerd/.local/share/docker`，应单独持久化，不要混入 `/root` 卷。
+
+Docker 官方的 rootless Docker-in-Docker 运行方式仍要求外层容器放开 seccomp、AppArmor 和 mount mask；本镜像使用文档推荐的 `--privileged` 方式。rootless 仅确保内层 `dockerd` 不以外层容器的 root 身份运行，不能抵消 `--privileged` 带来的外层容器风险。因此只应为受信任的开发或 CI 工作负载启用此模式。
+
+### Docker Compose
+
+```yaml
+services:
+  dev:
+    image: ghcr.io/rabbit-dayi/docker-image:latest
+    privileged: true
+    environment:
+      GITHUB_USER: rabbit-dayi
+      PASSWORD: change-this-password
+      DOCKERD_ROOTLESS_ENABLE: "true"
+    ports:
+      - "2222:22"
+      - "8080:8080"
+    volumes:
+      - docker-image-root:/root
+      - docker-image-workspace:/workspace
+      - docker-image-docker:/home/dockerd/.local/share/docker
+    restart: unless-stopped
+
+volumes:
+  docker-image-root:
+  docker-image-workspace:
+  docker-image-docker:
+```
+
+启用前，宿主机必须允许非特权 user namespace；服务启动时还会检查 `/dev/fuse`。条件不满足时 rootless `dockerd` 会保持 idle，SSH 和 code-server 不受影响。rootless Docker 的已知限制仍然适用，例如默认不能发布低于 1024 的端口，且没有 systemd/cgroup v2 委派时部分容器级资源限制不会生效。
 
 ## 访问方式
 
@@ -196,6 +257,8 @@ docker exec -it docker-image tailscale \
 | `TS_ACCEPT_DNS` | `false` | 是否接受 Tailscale DNS 配置。 |
 | `TS_ADVERTISE_TAGS` | 未设置 | 逗号分隔的 tags，例如 `tag:dev,tag:container`。 |
 | `TS_CONFIG_TIMEOUT` | `30` | 等待和配置 Tailscale 的秒数，允许 5–300。 |
+| `DOCKERD_ROOTLESS_ENABLE` | `false` | 严格设为 `true` 才启动镜像内的 rootless Docker daemon；需要外层容器使用 `--privileged`。 |
+| `DOCKER_HOST` | `unix:///run/user/1000/docker.sock` | 镜像内 Docker CLI 默认连接的 rootless daemon socket。 |
 | `TZ` | `Asia/Shanghai` | 容器时区。 |
 | `LANG` | `C.UTF-8` | 容器语言环境。 |
 
@@ -233,6 +296,7 @@ docker run -d \
 | `/root` | root 用户配置、SSH 配置、code-server 用户数据。 |
 | `/workspace` | 项目代码和默认工作目录。 |
 | `/var/lib/tailscale` | 可选的 Tailscale 节点身份和状态。 |
+| `/home/dockerd/.local/share/docker` | 可选的 rootless Docker-in-Docker 镜像、容器、卷和构建缓存。 |
 
 新的空 `/root` 卷会自动恢复 `.bashrc`、`.profile` 等默认配置。
 
@@ -258,11 +322,13 @@ tests/smoke.sh docker-image:local
 smoke test 会检查：
 
 - s6、SSH、code-server、uv 和 Tailscale 可执行文件
+- Docker CLI、Buildx、Compose plugin 和 rootless Docker 运行时依赖
 - SSH 配置语法和有效的 keepalive/认证设置
 - `/init`、sshd 和 code-server 的实际运行状态
 - 只读 `authorized_keys` 挂载下的真实 SSH 公钥登录
 - Tailscale 默认关闭，以及启用但缺少 TUN 时不会影响主服务
 - runner 提供 `/dev/net/tun` 时，Tailscale daemon、LocalAPI socket 和主服务的实际运行状态
+- 以 `--privileged` 运行时，rootless `dockerd` 的 socket、非 root daemon 身份，以及本地 scratch 镜像的构建和运行
 
 ## GitHub Actions
 
@@ -310,6 +376,18 @@ docker exec docker-image tailscale \
 
 确认设置了 `TS_ENABLE=true`、映射 `/dev/net/tun`、添加 `NET_ADMIN`/`NET_RAW`，并提供有效 auth key。若状态卷已经登录，通常不需要再次提供 key。
 
+### rootless Docker 不可用
+
+确认设置了 `DOCKERD_ROOTLESS_ENABLE=true`，且外层容器使用了 `--privileged`（Compose 为 `privileged: true`）。查看 daemon 日志和状态：
+
+```bash
+docker logs docker-image
+docker exec docker-image docker info
+docker exec docker-image ls -l /run/user/1000/docker.sock /dev/fuse
+```
+
+若日志提示 user namespace 不可用，需要由宿主机管理员启用非特权 user namespace；若提示 `/dev/fuse` 不可用，通常表示外层容器没有使用 `--privileged`。不要通过挂载宿主机 Docker socket 来替代这些条件，那会让容器直接控制宿主机 daemon。
+
 ### DNS 或 GitHub 暂时不可用
 
 GitHub SSH key 下载和 Tailscale 配置失败都不会让 SSH/code-server 无限重启。可以修复 Docker DNS，或使用持久化 `/root` 及手工挂载的 `authorized_keys`。
@@ -321,4 +399,5 @@ GitHub SSH key 下载和 Tailscale 配置失败都不会让 SSH/code-server 无�
 - auth key 应尽量使用一次性、短期、ephemeral 或受 tag 限制的 key；泄露后立即在 Tailscale 管理控制台吊销。
 - 对外暴露 code-server 时应使用强密码，或者通过 Tailscale、反向代理、内网或 SSH tunnel 访问。
 - 不建议在公网直接使用 `CODE_SERVER_AUTH=none`。
-- Tailscale 模式只需要有限 capabilities，不要使用 `privileged: true`。
+- Tailscale 模式本身只需要有限 capabilities，不需要 `privileged: true`。
+- rootless Docker-in-Docker 的 daemon 不是外层 root，但该模式的外层容器仍需 `--privileged`；不要将其用于不受信任的代码或多租户环境。

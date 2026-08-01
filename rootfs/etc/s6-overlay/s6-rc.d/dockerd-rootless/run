@@ -1,0 +1,38 @@
+#!/bin/bash
+set -euo pipefail
+
+if [ "${DOCKERD_ROOTLESS_ENABLE:-false}" != "true" ]; then
+    echo "[dockerd-rootless] Disabled. Set DOCKERD_ROOTLESS_ENABLE=true to enable rootless Docker."
+    exec sleep infinity
+fi
+
+docker_user=dockerd
+docker_home=/home/dockerd
+docker_uid="$(id -u "$docker_user")"
+runtime_dir="/run/user/${docker_uid}"
+data_dir="${docker_home}/.local/share/docker"
+
+if ! /command/s6-setuidgid "$docker_user" /usr/bin/test -w "$docker_home" \
+    || ! /command/s6-setuidgid "$docker_user" /usr/bin/test -w "$runtime_dir" \
+    || ! /command/s6-setuidgid "$docker_user" /usr/bin/test -w "$data_dir"; then
+    echo "[dockerd-rootless] Rootless runtime directories are not writable; service will stay idle." >&2
+    exec sleep infinity
+fi
+
+if [ ! -c /dev/fuse ]; then
+    echo "[dockerd-rootless] /dev/fuse is unavailable; start the outer container with --privileged." >&2
+    exec sleep infinity
+fi
+
+if ! /command/s6-setuidgid "$docker_user" /usr/bin/unshare --user --map-root-user true >/dev/null 2>&1; then
+    echo "[dockerd-rootless] Unprivileged user namespaces are unavailable; start the outer container with --privileged." >&2
+    exec sleep infinity
+fi
+
+exec /command/s6-setuidgid "$docker_user" /usr/bin/env \
+    HOME="$docker_home" \
+    XDG_RUNTIME_DIR="$runtime_dir" \
+    DOCKER_HOST= \
+    dockerd-rootless.sh \
+    --host="unix://${runtime_dir}/docker.sock" \
+    --storage-driver=fuse-overlayfs

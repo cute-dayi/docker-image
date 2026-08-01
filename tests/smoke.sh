@@ -20,10 +20,20 @@ assert_config() {
 
 docker run --rm --entrypoint /bin/bash "$image" -c '
     set -e
-    command -v /init sshd code-server uv tailscale tailscaled >/dev/null
+    command -v /init sshd code-server uv tailscale tailscaled \
+        docker dockerd dockerd-rootless.sh newuidmap newgidmap \
+        slirp4netns fuse-overlayfs ldd >/dev/null
+    test -x /usr/bin/true
+    command -v docker-rootlesskit >/dev/null || command -v rootlesskit >/dev/null
+    getent passwd dockerd | grep -q "^dockerd:x:1000:1000:"
+    grep -qx "dockerd:100000:65536" /etc/subuid
+    grep -qx "dockerd:100000:65536" /etc/subgid
+    docker buildx version >/dev/null
+    docker compose version >/dev/null
     bash -n /etc/s6-overlay/scripts/init-root \
         /etc/s6-overlay/scripts/configure-tailscale \
         /etc/s6-overlay/s6-rc.d/code-server/run \
+        /etc/s6-overlay/s6-rc.d/dockerd-rootless/run \
         /etc/s6-overlay/s6-rc.d/tailscaled/run
     sshd -t
 '
@@ -76,6 +86,7 @@ curl -fsS "http://127.0.0.1:${http_port}/healthz" >/dev/null
 [ "$original_keys" = "$(sha256sum "$tmpdir/authorized_keys")" ]
 docker exec "$container" pgrep -x sshd >/dev/null
 docker exec "$container" pgrep -f code-server >/dev/null
+! docker exec "$container" pgrep -x dockerd >/dev/null
 [ "$(docker inspect -f '{{.RestartCount}}' "$container")" = 0 ]
 
 # Tailscale is optional: enabling it without a TUN device must not take down SSH/code-server.
@@ -120,5 +131,52 @@ if [ -c /dev/net/tun ]; then
     docker exec "$container" pgrep -x sshd >/dev/null
     docker exec "$container" pgrep -f code-server >/dev/null
 fi
+
+# Rootless Docker needs the outer container's relaxed security profile. Verify
+# that the daemon runs as the dedicated user and can build and start an inner
+# container without depending on an external image registry.
+docker rm -f "$container" >/dev/null
+docker run -d \
+    --name "$container" \
+    --privileged \
+    -e GITHUB_USER= \
+    -e CODE_SERVER_AUTH=none \
+    -e DOCKERD_ROOTLESS_ENABLE=true \
+    "$image" >/dev/null
+rootless_ready=0
+for _ in {1..60}; do
+    if docker exec "$container" docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless; then
+        rootless_ready=1
+        break
+    fi
+    sleep 1
+done
+if [ "$rootless_ready" -ne 1 ]; then
+    docker logs "$container" >&2
+    exit 1
+fi
+docker exec "$container" test -S /run/user/1000/docker.sock
+docker exec "$container" docker info --format '{{json .SecurityOptions}}' | grep -q rootless
+docker exec "$container" bash -c 'test "$(ps -C dockerd -o user= | tr -d " ")" = dockerd'
+docker exec -i "$container" /bin/bash -se <<'INNER_DOCKER_SMOKE'
+set -o pipefail
+context="$(mktemp -d)"
+trap 'rm -rf "$context"' EXIT
+
+mkdir -p "$context/rootfs"
+cp --parents /usr/bin/true "$context/rootfs"
+ldd /usr/bin/true | awk '/=> \// { print $3 } /^\// { print $1 }' | while IFS= read -r library; do
+    cp --parents "$library" "$context/rootfs"
+done
+
+docker build --quiet -t rootless-dind-smoke -f - "$context" <<'DOCKERFILE'
+FROM scratch
+COPY rootfs/ /
+ENTRYPOINT ["/usr/bin/true"]
+DOCKERFILE
+docker run --rm rootless-dind-smoke
+INNER_DOCKER_SMOKE
+docker exec "$container" pgrep -x sshd >/dev/null
+docker exec "$container" pgrep -f code-server >/dev/null
 
 echo "Smoke tests passed for $image"
