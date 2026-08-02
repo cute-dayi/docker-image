@@ -69,10 +69,16 @@ RUN set -eux; \
     curl -fsSL --retry 3 --retry-all-errors \
       https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list \
       -o /etc/apt/sources.list.d/tailscale.list; \
+    curl -fsSL --retry 3 --retry-all-errors \
+      https://pkg.cloudflare.com/cloudflare-main.gpg \
+      -o /usr/share/keyrings/cloudflare-main.gpg; \
+    printf '%s\n' \
+      'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' \
+      > /etc/apt/sources.list.d/cloudflared.list; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
       docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
-      docker-ce-rootless-extras "tailscale=${TAILSCALE_VERSION}"; \
+      docker-ce-rootless-extras "tailscale=${TAILSCALE_VERSION}" cloudflared; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd --gid 1000 dockerd; \
     useradd --uid 1000 --gid dockerd --create-home --shell /usr/sbin/nologin dockerd; \

@@ -22,7 +22,7 @@ assert_config() {
 
 docker run --rm --entrypoint /bin/bash "$image" -c '
     set -e
-    command -v /init sshd code-server uv tailscale tailscaled nginx openssl \
+    command -v /init sshd code-server uv tailscale tailscaled cloudflared nginx openssl \
         docker dockerd dockerd-rootless.sh newuidmap newgidmap \
         slirp4netns fuse-overlayfs ldd \
         htop jq lsof ncdu tree dig mtr tcpdump rsync socat pstree strace \

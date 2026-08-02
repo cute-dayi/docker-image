@@ -7,6 +7,7 @@
 - `code-server`：在浏览器中使用 VS Code
 - `Nginx`：统一 Web 出口，默认将 HTTP 重定向到 HTTPS，并反代 code-server 的 WebSocket
 - `Tailscale`：可选的容器内 tailnet 接入服务
+- `cloudflared`：预装的 Cloudflare Tunnel 客户端，默认不启动
 - `Docker CLI`、Buildx、Compose plugin，以及可选的 rootless Docker-in-Docker daemon
 - `uv`：Python 包管理/运行工具
 - `Node.js`、`npm`、`npx`：JavaScript/TypeScript 运行与包管理
@@ -26,6 +27,8 @@
 - 数据、同步与脚本：`jq`、`rsync`、`node`、`npm`、`npx`
 
 `tcpdump` 抓包需要容器具备 `NET_RAW` 能力；受默认 seccomp 或 ptrace 限制的运行环境中，`strace` 可能需要额外授予调试权限。
+
+`cloudflared` 已预装，可按需用 `cloudflared tunnel` 命令运行 Cloudflare Tunnel；镜像不会在未提供 tunnel 配置或令牌时自动启动它。
 
 ## 镜像地址
 
@@ -407,7 +410,7 @@ tests/smoke.sh docker-image:local
 
 smoke test 会检查：
 
-- s6、SSH、code-server、Nginx、OpenSSL、uv 和 Tailscale 可执行文件
+- s6、SSH、code-server、Nginx、OpenSSL、uv、Tailscale 和 cloudflared 可执行文件
 - Node.js、npm 和 npx
 - 基础维护工具的可执行文件
 - Docker CLI、Buildx、Compose plugin 和 rootless Docker 运行时依赖
