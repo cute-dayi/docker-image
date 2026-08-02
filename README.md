@@ -30,7 +30,7 @@
 
 `tcpdump` 抓包需要容器具备 `NET_RAW` 能力；受默认 seccomp 或 ptrace 限制的运行环境中，`strace` 可能需要额外授予调试权限。
 
-`cloudflared` 已预装，可按需用 `cloudflared tunnel` 命令运行 Cloudflare Tunnel；镜像不会在未提供 tunnel 配置或令牌时自动启动它。
+`cloudflared` 已预装，可按需用 `cloudflared tunnel` 命令运行 Cloudflare Tunnel；镜像不会在未提供 tunnel 配置或令牌时自动启动它。DNS 管理页的“临时 Cloudflare Tunnel”面板也可以把容器内的 HTTP 服务临时发布为随机的 `trycloudflare.com` 地址，或直接打开 [try.cloudflare.com](https://try.cloudflare.com/)；该地址只在当前容器运行期间有效，适合测试，不适合生产服务。
 
 ### 启动横幅
 
@@ -87,6 +87,8 @@ fusermount3 -u /workspace/remote
 普通 Docker 容器不会因为这个功能被强制改成公共 DNS：如果没有检测到本地 Mihomo DNS，默认保留 Docker 注入的 DNS（通常是 `127.0.0.11`）。确实需要在本地 DNS 不响应时也尝试 `1.1.1.1`，可设置 `RESOLV_FALLBACK_ALWAYS=true`。对于 Docker 的文件挂载，脚本会在原子替换失败时尝试原地写入；符号链接、只读挂载或无法写入时，只记录提示并保留原文件。
 
 当没有通过环境变量锁定 DNS 参数时，可访问 `https://<域名>/dns/` 打开 DNS 管理页，填写参数后执行“测试 DNS”或“保存并应用”。配置默认持久化到 `/root/.config/docker-image/resolver.json`，因此挂载 `/root` 后重建容器仍会保留。设置 `RESOLV_AUTO_CONFIG`、`RESOLV_LOCAL_NAMESERVER`、`RESOLV_FALLBACK_NAMESERVER`、`RESOLV_FALLBACK_ALWAYS` 或 `RESOLV_CHECK_DOMAIN` 后，对应字段由环境变量控制，页面不会覆盖它们。
+
+页面下方的“临时 Cloudflare Tunnel”可以填写 `127.0.0.1:8080`、`http://127.0.0.1:8080` 或其他容器内 HTTP(S) 服务地址，点击“新建临时隧道”后等待随机的 `https://*.trycloudflare.com` 链接，再用“停止隧道”回收进程。它调用 Quick Tunnel（等价于 `cloudflared tunnel --no-autoupdate --url ...`），不需要 Cloudflare 账号或 API token；进程、URL 和日志只保存在 `/run` 内存文件系统中，不会写入 `/root`。Cloudflare 将 Quick Tunnel 定位为开发测试功能，并有并发请求数和 SSE 等限制，生产环境应使用正式的命名 Tunnel。
 
 管理页优先使用 `RESOLV_WEB_PASSWORD` 生成 Nginx Basic Auth；未设置时使用已有的 `PASSWORD`。如果两者都没有，页面不会启用认证，不应直接暴露到公网。
 
@@ -429,7 +431,7 @@ docker exec -it docker-image tailscale \
 | `RESOLV_WEB_ENABLE` | `true` | 是否启用 `/dns/` DNS 管理页和本地 API。 |
 | `RESOLV_WEB_PORT` | `8787` | DNS 管理 API 仅监听容器内 `127.0.0.1` 的端口。 |
 | `RESOLV_WEB_PASSWORD` | 未设置 | DNS 管理页的 Basic Auth 密码；未设置时回退使用 `PASSWORD`。 |
-| `RESOLV_STATE_FILE` | `/root/.config/docker-image/resolver.json` | DNS 页面保存的持久化配置文件。 |
+| `RESOLV_STATE_FILE` | `/root/.config/docker-image/resolver.json` | DNS 页面保存的持久化配置文件；临时 Cloudflare Tunnel 不使用此文件。 |
 | `RESOLV_AUTO_CONFIG` | `true` | 是否在启动时探测并补充 DNS；设为 `false` 可完全禁用。 |
 | `RESOLV_LOCAL_NAMESERVER` | `127.0.0.1` | Mihomo 本地 DNS 的 IPv4 地址，探测端口固定为 `53`。 |
 | `RESOLV_FALLBACK_NAMESERVER` | `1.1.1.1` | 公共 DNS 备用 IPv4 地址，探测端口固定为 `53`。 |
@@ -517,7 +519,7 @@ smoke test 会检查：
 - SSH 配置语法和有效的 keepalive/认证设置
 - 默认自签名证书、域名 HTTPS 反代、HTTP 到 HTTPS 跳转，以及挂载自定义 TLS 证书
 - `/services/` 动态跳转页、`/status/` 运行状态页和内部服务前缀反代
-- `/dns/` DNS 管理页的测试、持久化和环境变量覆盖行为
+- `/dns/` DNS 管理页的测试、持久化和环境变量覆盖行为，以及临时 Cloudflare Tunnel API 的状态和目标校验
 - Mihomo 共享网络下 DNS 探测、禁用开关和现有 `resolv.conf` 保留行为
 - 状态采样服务、`dev` 运维命令和真实服务路由健康检查
 - `/init`、sshd、code-server 和 nginx 的实际运行状态

@@ -10,6 +10,9 @@ const { Resolver } = require('node:dns').promises;
 
 const stateFile = process.env.RESOLV_STATE_FILE || '/root/.config/docker-image/resolver.json';
 const port = Number.parseInt(process.env.RESOLV_WEB_PORT || '8787', 10);
+const cloudflaredBin = process.env.CLOUDFLARED_BIN || 'cloudflared';
+const tunnelRuntimeDir = '/run/cloudflared';
+const tunnelDefaultTarget = process.env.NGINX_UPSTREAM || '127.0.0.1:8080';
 const defaults = {
   auto_config: true,
   local_nameserver: '127.0.0.1',
@@ -48,6 +51,38 @@ function validDomain(value) {
     throw new Error('check_domain must be a simple DNS name');
   }
   return value;
+}
+
+function normalizeTunnelTarget(value) {
+  if (typeof value !== 'string' || value.trim().length === 0 || value.length > 255) {
+    throw new Error('target must be an HTTP(S) origin such as 127.0.0.1:8080');
+  }
+  const input = value.trim();
+  if (input.includes('://') && !/^https?:\/\//i.test(input)) {
+    throw new Error('target must be an HTTP(S) origin such as 127.0.0.1:8080');
+  }
+  const candidate = /^https?:\/\//i.test(input) ? input : `http://${input}`;
+  let parsed;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    throw new Error('target must be an HTTP(S) origin such as 127.0.0.1:8080');
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error('target must be an HTTP(S) origin without credentials or query parameters');
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  const validHostname = net.isIP(hostname) === 4
+    || hostname === 'localhost'
+    || /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(hostname);
+  if (!validHostname || hostname.includes('..')) {
+    throw new Error('target hostname must be a valid IPv4 address, localhost, or DNS name');
+  }
+  if (parsed.port && (!/^\d+$/.test(parsed.port) || Number(parsed.port) < 1 || Number(parsed.port) > 65535)) {
+    throw new Error('target port must be between 1 and 65535');
+  }
+  const pathname = parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : '';
+  return `${parsed.protocol}//${hostname}${parsed.port ? `:${parsed.port}` : ''}${pathname}`;
 }
 
 function validateConfig(input) {
@@ -177,6 +212,138 @@ function applyConfig(config) {
   });
 }
 
+let tunnelProcess = null;
+let tunnelStopRequested = false;
+let tunnelState = {
+  url: null,
+  target: null,
+  started_at: null,
+  last_error: null,
+  output_tail: '',
+};
+
+function defaultTunnelTarget() {
+  try {
+    return normalizeTunnelTarget(tunnelDefaultTarget);
+  } catch {
+    return 'http://127.0.0.1:8080';
+  }
+}
+
+function extractTunnelUrl(output) {
+  const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com(?:\/[^\s]*)?/i);
+  return match ? match[0].replace(/[),.;]+$/, '') : null;
+}
+
+function tunnelOutput(chunk) {
+  tunnelState.output_tail = `${tunnelState.output_tail}${chunk}`.slice(-4096);
+  if (!tunnelState.url) {
+    const url = extractTunnelUrl(tunnelState.output_tail);
+    if (url) tunnelState.url = url;
+  }
+}
+
+function publicTunnelState() {
+  const running = Boolean(tunnelProcess);
+  return {
+    running,
+    pid: running ? tunnelProcess.pid : null,
+    url: tunnelState.url,
+    target: tunnelState.target,
+    started_at: tunnelState.started_at,
+    last_error: tunnelState.last_error,
+    output_tail: running ? '' : tunnelState.output_tail,
+    default_target: defaultTunnelTarget(),
+  };
+}
+
+async function startTunnel(targetInput) {
+  if (tunnelProcess) throw new Error('a temporary tunnel is already running');
+  const target = normalizeTunnelTarget(targetInput || tunnelDefaultTarget);
+  fs.mkdirSync(tunnelRuntimeDir, { recursive: true, mode: 0o700 });
+  tunnelState = {
+    url: null,
+    target,
+    started_at: new Date().toISOString(),
+    last_error: null,
+    output_tail: '',
+  };
+  tunnelStopRequested = false;
+
+  let child;
+  try {
+    child = spawn(cloudflaredBin, ['tunnel', '--no-autoupdate', '--url', target], {
+      cwd: '/',
+      env: { ...process.env, HOME: tunnelRuntimeDir, XDG_CONFIG_HOME: tunnelRuntimeDir },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (error) {
+    tunnelState.last_error = error.message;
+    throw error;
+  }
+  tunnelProcess = child;
+  child.stdout.on('data', tunnelOutput);
+  child.stderr.on('data', tunnelOutput);
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve(publicTunnelState());
+    };
+    const timeout = setTimeout(() => {
+      tunnelState.last_error = 'cloudflared did not publish a trycloudflare.com URL within 10 seconds';
+      child.kill('SIGTERM');
+      finish(new Error(tunnelState.last_error));
+    }, 10000);
+    const checkUrl = () => {
+      if (tunnelState.url) finish();
+    };
+    child.stdout.on('data', checkUrl);
+    child.stderr.on('data', checkUrl);
+    child.once('error', (error) => {
+      tunnelState.last_error = error.message;
+      if (tunnelProcess === child) tunnelProcess = null;
+      finish(error);
+    });
+    child.once('exit', (code, signal) => {
+      if (tunnelProcess === child) tunnelProcess = null;
+      if (!tunnelState.url) {
+        tunnelState.last_error = `cloudflared exited before creating a tunnel (${signal || `code ${code}`})`;
+        finish(new Error(tunnelState.last_error));
+      } else if (code !== 0 && !tunnelState.last_error && !tunnelStopRequested) {
+        tunnelState.last_error = `cloudflared exited (${signal || `code ${code}`})`;
+      }
+    });
+  });
+}
+
+async function stopTunnel() {
+  const child = tunnelProcess;
+  if (!child) return publicTunnelState();
+  tunnelStopRequested = true;
+  child.kill('SIGTERM');
+  await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (tunnelProcess === child) child.kill('SIGKILL');
+      resolve();
+    }, 5000);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  if (tunnelProcess === child) tunnelProcess = null;
+  tunnelState.url = null;
+  tunnelState.last_error = null;
+  tunnelState.output_tail = '';
+  tunnelStopRequested = false;
+  return publicTunnelState();
+}
+
 async function handle(request, response) {
   const requestUrl = new URL(request.url, `http://${request.headers.host || '127.0.0.1'}`);
   if (request.method === 'GET' && requestUrl.pathname === '/api/resolver') {
@@ -186,6 +353,36 @@ async function handle(request, response) {
       state_file: stateFile,
       password_protected: Boolean(process.env.RESOLV_WEB_PASSWORD || process.env.PASSWORD),
     });
+    return;
+  }
+
+  if (request.method === 'GET' && requestUrl.pathname === '/api/tunnel') {
+    writeJson(response, 200, publicTunnelState());
+    return;
+  }
+
+  if (request.method === 'POST' && requestUrl.pathname === '/api/tunnel/start') {
+    let body = {};
+    try {
+      body = JSON.parse(await readBody(request));
+    } catch (error) {
+      writeJson(response, 400, { error: error.message || 'invalid JSON' });
+      return;
+    }
+    try {
+      writeJson(response, 200, await startTunnel(body.target));
+    } catch (error) {
+      writeJson(response, 400, { error: error.message || 'could not start temporary tunnel', state: publicTunnelState() });
+    }
+    return;
+  }
+
+  if (request.method === 'POST' && requestUrl.pathname === '/api/tunnel/stop') {
+    try {
+      writeJson(response, 200, { stopped: true, ...await stopTunnel() });
+    } catch (error) {
+      writeJson(response, 500, { error: error.message || 'could not stop temporary tunnel' });
+    }
     return;
   }
 
@@ -246,5 +443,12 @@ const server = http.createServer((request, response) => {
 server.listen(port, '127.0.0.1', () => {
   console.log(`[resolver-web] Listening on 127.0.0.1:${port}; state=${stateFile}`);
 });
-process.on('SIGTERM', () => server.close(() => process.exit(0)));
-process.on('SIGINT', () => server.close(() => process.exit(0)));
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  await stopTunnel();
+  server.close(() => process.exit(0));
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

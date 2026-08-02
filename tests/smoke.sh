@@ -92,6 +92,7 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     grep -Fq status.json /run/nginx/status/index.html
     grep -Fq "location = /dns/" /run/nginx/nginx.conf
     grep -Fq "location ^~ /dns/api/" /run/nginx/nginx.conf
+    grep -Fq "proxy_read_timeout 20s" /run/nginx/nginx.conf
     grep -Fq "auth_basic_user_file /run/nginx/resolver.htpasswd;" /run/nginx/nginx.conf
     test "$(stat -c "%a %U %G" /run/nginx/resolver.htpasswd)" = "640 root www-data"
     test -s /run/nginx/dns/index.html
@@ -223,10 +224,22 @@ dns_page="$(curl --noproxy '*' -fkS \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/dns/")"
 printf '%s\n' "$dns_page" | grep -Fq 'id="resolver-form"'
+printf '%s\n' "$dns_page" | grep -Fq 'https://try.cloudflare.com/'
+printf '%s\n' "$dns_page" | grep -Fq 'id="tunnel-start"'
 dns_json="$(curl --noproxy '*' -fkS \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/dns/api/resolver")"
 printf '%s\n' "$dns_json" | jq -e '.config.local_nameserver == "127.0.0.1"' >/dev/null
+tunnel_json="$(curl --noproxy '*' -fkS \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/dns/api/tunnel")"
+printf '%s\n' "$tunnel_json" | jq -e '.running == false and .default_target == "http://127.0.0.1:8080"' >/dev/null
+tunnel_invalid="$(curl --noproxy '*' -skS -X POST \
+    -H 'Content-Type: application/json' \
+    --data '{"target":"file:///etc/passwd"}' \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/dns/api/tunnel/start")"
+printf '%s\n' "$tunnel_invalid" | jq -e '.error | contains("HTTP(S)")' >/dev/null
 dns_apply="$(curl --noproxy '*' -fkS -X POST \
     -H 'Content-Type: application/json' \
     --data '{"auto_config":false,"local_nameserver":"127.0.0.1","fallback_nameserver":"1.1.1.1","fallback_always":false,"check_domain":"example.com"}' \

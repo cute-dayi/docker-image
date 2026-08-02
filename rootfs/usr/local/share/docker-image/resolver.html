@@ -41,6 +41,10 @@
     .check.ok { border-color: #9bcbbd; background: #f0faf6; }
     .check.fail { border-color: #e4b1a9; background: #fff7f5; }
     .meta { margin: 0; color: #697572; font-size: 12px; }
+    .hint { margin: -4px 0 16px; color: #697572; font-size: 13px; line-height: 1.5; }
+    .tunnel-status { min-height: 24px; margin: 16px 0 0; color: #51605d; overflow-wrap: anywhere; }
+    .tunnel-status.error { color: #b3473c; }
+    .tunnel-link { display: inline-block; margin-top: 8px; font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
     @media (max-width: 560px) { body { padding: 16px; } header { align-items: flex-start; flex-direction: column; gap: 10px; } .fields, .checks { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -73,6 +77,17 @@
       <div id="checks" class="checks" aria-live="polite"></div>
       <p id="meta" class="meta"></p>
     </section>
+    <section class="panel">
+      <h2>临时 Cloudflare Tunnel</h2>
+      <p class="hint">把容器内的 HTTP 服务临时映射到公网测试。隧道只在当前容器运行期间存在，地址会随机变化，不写入持久化配置。也可以先查看 <a href="https://try.cloudflare.com/" target="_blank" rel="noreferrer">try.cloudflare.com</a>。</p>
+      <label>内部服务地址<input id="tunnel-target" type="text" inputmode="url" autocomplete="off" placeholder="127.0.0.1:8080"></label>
+      <div class="actions">
+        <button id="tunnel-start" type="button">新建临时隧道</button>
+        <button id="tunnel-stop" class="secondary" type="button" disabled>停止隧道</button>
+      </div>
+      <p id="tunnel-status" class="tunnel-status" aria-live="polite">正在读取隧道状态...</p>
+      <a id="tunnel-link" class="tunnel-link" href="#" target="_blank" rel="noreferrer" hidden></a>
+    </section>
   </main>
   <script>
     const form = document.getElementById('resolver-form');
@@ -80,10 +95,11 @@
     const result = document.getElementById('result');
     const checks = document.getElementById('checks');
     const meta = document.getElementById('meta');
-    const buttons = [...document.querySelectorAll('button')];
+    const resolverButtons = [...document.querySelectorAll('#resolver-form button')];
     const fields = ['local_nameserver', 'fallback_nameserver', 'check_domain'];
     const labels = { local: '本地 DNS', fallback: '备用 DNS' };
     let statePath = '/root/.config/docker-image/resolver.json';
+    let tunnelTimer;
 
     function configFromForm() {
       return {
@@ -107,7 +123,7 @@
       document.getElementById('fallback_always').disabled = Boolean(locked.fallback_always);
     }
 
-    function setBusy(busy) { buttons.forEach((button) => { button.disabled = busy; }); }
+    function setBusy(busy) { resolverButtons.forEach((button) => { button.disabled = busy; }); }
     function setMessage(message, error = false) { result.textContent = message; result.className = `result${error ? ' error' : ''}`; }
 
     function renderChecks(data) {
@@ -115,8 +131,15 @@
       checks.innerHTML = entries.map(([key, item]) => `<div class="check ${item.ok ? 'ok' : 'fail'}"><strong>${labels[key] || key}: ${item.ok ? '可用' : '不可用'}</strong><span>${item.ok ? (item.addresses || []).join(', ') : (item.error || 'no response')}</span></div>`).join('');
     }
 
-    async function call(path, body) {
+    async function call(path, body = {}) {
       const response = await fetch(`/dns/api/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      return payload;
+    }
+
+    async function get(path) {
+      const response = await fetch(`/dns/api/${path}`, { cache: 'no-store' });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
       return payload;
@@ -139,6 +162,70 @@
       finally { setBusy(false); }
     });
 
+    function renderTunnel(payload) {
+      const target = document.getElementById('tunnel-target');
+      const status = document.getElementById('tunnel-status');
+      const link = document.getElementById('tunnel-link');
+      const start = document.getElementById('tunnel-start');
+      const stop = document.getElementById('tunnel-stop');
+      if (!target.value && payload.default_target) target.value = payload.default_target;
+      start.disabled = Boolean(payload.running);
+      stop.disabled = !payload.running;
+      status.className = `tunnel-status${payload.last_error ? ' error' : ''}`;
+      if (payload.running) {
+        status.textContent = `运行中：${payload.target || '未知目标'}`;
+      } else if (payload.last_error) {
+        status.textContent = `隧道已停止：${payload.last_error}`;
+      } else {
+        status.textContent = '当前没有运行中的临时隧道。';
+      }
+      if (payload.url) {
+        link.hidden = false;
+        link.href = payload.url;
+        link.textContent = payload.url;
+      } else {
+        link.hidden = true;
+        link.removeAttribute('href');
+        link.textContent = '';
+      }
+    }
+
+    async function refreshTunnel() {
+      try {
+        const payload = await get('tunnel');
+        renderTunnel(payload);
+        tunnelTimer = setTimeout(refreshTunnel, payload.running ? 2000 : 5000);
+      } catch (error) {
+        document.getElementById('tunnel-status').textContent = error.message;
+        document.getElementById('tunnel-status').className = 'tunnel-status error';
+        tunnelTimer = setTimeout(refreshTunnel, 5000);
+      }
+    }
+
+    document.getElementById('tunnel-start').addEventListener('click', async () => {
+      const start = document.getElementById('tunnel-start');
+      const stop = document.getElementById('tunnel-stop');
+      start.disabled = true; stop.disabled = true;
+      document.getElementById('tunnel-status').textContent = '正在连接 Cloudflare...';
+      try {
+        const payload = await call('tunnel/start', { target: document.getElementById('tunnel-target').value.trim() });
+        renderTunnel(payload);
+      } catch (error) {
+        document.getElementById('tunnel-status').textContent = error.message;
+        document.getElementById('tunnel-status').className = 'tunnel-status error';
+        await refreshTunnel();
+      }
+    });
+
+    document.getElementById('tunnel-stop').addEventListener('click', async () => {
+      const start = document.getElementById('tunnel-start');
+      const stop = document.getElementById('tunnel-stop');
+      start.disabled = true; stop.disabled = true;
+      document.getElementById('tunnel-status').textContent = '正在停止隧道...';
+      try { renderTunnel(await call('tunnel/stop')); }
+      catch (error) { document.getElementById('tunnel-status').textContent = error.message; document.getElementById('tunnel-status').className = 'tunnel-status error'; }
+    });
+
     fetch('/dns/api/resolver', { cache: 'no-store' }).then(async (response) => {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
@@ -153,6 +240,7 @@
       }
       meta.textContent = payload.password_protected ? `此页面使用 Basic Auth 保护；持久化位置：${statePath}` : '未检测到 PASSWORD 或 RESOLV_WEB_PASSWORD，请勿将此页面直接暴露到公网。';
     }).catch((error) => { source.textContent = error.message; source.className = 'source warning'; });
+    refreshTunnel();
   </script>
 </body>
 </html>
