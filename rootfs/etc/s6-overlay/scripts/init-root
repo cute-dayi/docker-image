@@ -79,3 +79,4 @@ if id dockerd >/dev/null 2>&1; then
 fi
 
 echo -e "${GREEN}[init-root] Initialization done.${NC}"
+/usr/local/bin/docker-image-banner

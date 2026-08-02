@@ -23,6 +23,7 @@ assert_config() {
 docker run --rm --entrypoint /bin/bash "$image" -c '
     set -e
     command -v /init sshd code-server uv tailscale tailscaled cloudflared nginx openssl \
+        /usr/local/bin/docker-image-banner \
         docker dockerd dockerd-rootless.sh newuidmap newgidmap \
         slirp4netns fuse-overlayfs ldd \
         htop jq lsof ncdu tree dig mtr tcpdump rsync socat pstree strace \
@@ -38,10 +39,17 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     bash -n /etc/s6-overlay/scripts/init-root \
         /etc/s6-overlay/scripts/configure-nginx \
         /etc/s6-overlay/scripts/configure-tailscale \
+        /usr/local/bin/docker-image-banner \
         /etc/s6-overlay/s6-rc.d/code-server/run \
         /etc/s6-overlay/s6-rc.d/dockerd-rootless/run \
         /etc/s6-overlay/s6-rc.d/nginx/run \
         /etc/s6-overlay/s6-rc.d/tailscaled/run
+    banner="$(NGINX_SERVER_NAMES=code.example.test \
+        NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
+        /usr/local/bin/docker-image-banner)"
+    printf '%s\n' "$banner" | grep -Fq 'DOCKER IMAGE'
+    printf '%s\n' "$banner" | grep -Fq 'https://code.example.test:443/services/'
+    [ -z "$(STARTUP_BANNER=false /usr/local/bin/docker-image-banner)" ]
     NGINX_SERVER_NAMES=code.example.test \
         NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
         /etc/s6-overlay/scripts/configure-nginx
@@ -114,6 +122,14 @@ ssh -i "$tmpdir/id_ed25519" -p "$ssh_port" \
     -o BatchMode=yes -o ConnectTimeout=5 \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     root@127.0.0.1 'test "$(ps -p 1 -o comm=)" = s6-svscan'
+
+for _ in {1..30}; do
+    if docker logs "$container" 2>&1 | grep -Fq 'DOCKER IMAGE'; then
+        break
+    fi
+    sleep 1
+done
+docker logs "$container" 2>&1 | grep -Fq 'DOCKER IMAGE'
 
 for _ in {1..30}; do
     curl --noproxy '*' -fkS \

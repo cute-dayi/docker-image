@@ -1,0 +1,67 @@
+#!/bin/bash
+set -u
+
+case "${STARTUP_BANNER:-true}" in
+    true|1|yes|on) ;;
+    false|0|no|off) exit 0 ;;
+    *)
+        printf '%s\n' '[startup-banner] Ignoring unsupported STARTUP_BANNER value.' >&2
+        ;;
+esac
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    accent=$'\033[38;5;45m'
+    bold=$'\033[1;38;5;255m'
+    muted=$'\033[38;5;245m'
+    reset=$'\033[0m'
+else
+    accent=''
+    bold=''
+    muted=''
+    reset=''
+fi
+
+feature_status() {
+    case "${1:-}" in
+        true|1|yes|on) printf 'on' ;;
+        false|0|no|off) printf 'off' ;;
+        *) printf 'default' ;;
+    esac
+}
+
+row() {
+    printf '%b\n' "${accent}|${reset}  $1"
+}
+
+display_host="${NGINX_SERVER_NAMES:-localhost}"
+display_host="${display_host%%,*}"
+[ "$display_host" = '_' ] && display_host='localhost'
+if [[ "$display_host" =~ [^A-Za-z0-9.*_-] ]]; then
+    display_host='configured-host'
+fi
+
+https_port="${NGINX_HTTPS_PORT:-443}"
+[[ "$https_port" =~ ^[0-9]{1,5}$ ]] || https_port=443
+
+nginx_status="$(feature_status "${NGINX_ENABLE:-true}")"
+if [ "$nginx_status" = 'on' ]; then
+    web_entry="https://${display_host}:${https_port}/services/"
+else
+    web_entry='disabled (set NGINX_ENABLE=true to enable)'
+fi
+
+service_count=0
+if [ -n "${NGINX_SERVICE_LINKS:-}" ]; then
+    IFS=';' read -r -a service_entries <<<"${NGINX_SERVICE_LINKS}"
+    service_count="${#service_entries[@]}"
+fi
+
+printf '%b\n' "${accent}+------------------------------------------------------------+${reset}"
+printf '%b\n' "${accent}|${reset}  ${bold}DOCKER IMAGE${reset}  ${muted}:: REMOTE DEV GATEWAY${reset}"
+printf '%b\n' "${accent}|${reset}  ${muted}boot sequence initialized${reset}"
+row "SSH       ssh://root@${display_host}:22"
+row "WEB       ${web_entry}"
+row "WORKSPACE /workspace"
+row "SERVICES  ${service_count} custom route(s)  |  SSHFS ready"
+row "DIND      $(feature_status "${DOCKERD_ROOTLESS_ENABLE:-false}")  |  TAILSCALE $(feature_status "${TS_ENABLE:-false}")"
+printf '%b\n' "${accent}+------------------------------------------------------------+${reset}"

@@ -31,6 +31,15 @@
 
 `cloudflared` 已预装，可按需用 `cloudflared tunnel` 命令运行 Cloudflare Tunnel；镜像不会在未提供 tunnel 配置或令牌时自动启动它。
 
+### 启动横幅
+
+容器启动时会输出一个带网关地址、SSH 入口、工作目录和可选服务状态的启动横幅。默认启用；不需要时设置：
+
+```yaml
+environment:
+  STARTUP_BANNER: "false"
+```
+
 ### SSHFS 远程目录
 
 镜像预装 `sshfs` 和 `fusermount3`。启动容器时需要把宿主机的 FUSE 设备和挂载能力传入容器：
