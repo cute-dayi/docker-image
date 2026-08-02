@@ -1,0 +1,126 @@
+#!/bin/bash
+set -euo pipefail
+
+case "${RESOLV_AUTO_CONFIG:-true}" in
+    true) ;;
+    false)
+        echo "[resolv-config] Automatic resolver configuration disabled."
+        exit 0
+        ;;
+    *)
+        echo "[resolv-config] RESOLV_AUTO_CONFIG must be true or false; keeping the existing file." >&2
+        exit 0
+        ;;
+esac
+
+resolv_file="${RESOLV_CONFIG_FILE:-/etc/resolv.conf}"
+local_server="${RESOLV_LOCAL_NAMESERVER:-127.0.0.1}"
+fallback_server="${RESOLV_FALLBACK_NAMESERVER:-1.1.1.1}"
+check_domain="${RESOLV_CHECK_DOMAIN:-example.com}"
+fallback_always="${RESOLV_FALLBACK_ALWAYS:-false}"
+
+valid_server() {
+    local value=$1
+    local octet
+    local -a octets
+
+    [[ "$value" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    IFS='.' read -r -a octets <<<"$value"
+    for octet in "${octets[@]}"; do
+        ((10#$octet <= 255)) || return 1
+    done
+}
+
+if ! valid_server "$local_server" || ! valid_server "$fallback_server"; then
+    echo "[resolv-config] Resolver addresses are invalid; keeping the existing file." >&2
+    exit 0
+fi
+if [[ ! "$check_domain" =~ ^[A-Za-z0-9.-]+$ ]]; then
+    check_domain=example.com
+fi
+if [ "$fallback_always" != true ]; then
+    fallback_always=false
+fi
+
+if [ ! -f "$resolv_file" ] || [ -L "$resolv_file" ]; then
+    echo "[resolv-config] ${resolv_file} is missing or a symlink; keeping the existing resolver setup."
+    exit 0
+fi
+if [ ! -w "$resolv_file" ] || ! command -v dig >/dev/null 2>&1; then
+    echo "[resolv-config] Resolver file is read-only or dig is unavailable; keeping the existing setup."
+    exit 0
+fi
+
+resolver_responds() {
+    local server=$1
+    local response
+
+    response="$(dig +time=1 +tries=1 +noall +stats "$check_domain" "@$server" 2>/dev/null || true)"
+    printf '%s\n' "$response" | grep -q '^;; SERVER:'
+}
+
+local_ready=false
+fallback_ready=false
+if resolver_responds "$local_server"; then
+    local_ready=true
+fi
+if [ "$local_ready" = true ] || [ "$fallback_always" = true ]; then
+    if resolver_responds "$fallback_server"; then
+        fallback_ready=true
+    fi
+fi
+
+declare -a additions=()
+has_nameserver() {
+    awk -v server="$1" '$1 == "nameserver" && $2 == server {found=1} END {exit !found}' "$resolv_file"
+}
+add_server() {
+    local server=$1
+    if ! has_nameserver "$server"; then
+        additions+=("$server")
+    fi
+}
+
+if [ "$local_ready" = true ]; then
+    add_server "$local_server"
+    [ "$fallback_ready" = true ] && add_server "$fallback_server"
+elif [ "$fallback_always" = true ] && [ "$fallback_ready" = true ]; then
+    add_server "$fallback_server"
+else
+    echo "[resolv-config] No local resolver detected on ${local_server}:53; keeping the existing setup."
+    exit 0
+fi
+
+if [ "${#additions[@]}" -eq 0 ]; then
+    echo "[resolv-config] Existing resolver entries are already configured."
+    exit 0
+fi
+
+if ! tmp_file="$(mktemp "${resolv_file}.XXXXXX")"; then
+    echo "[resolv-config] Could not create a temporary resolver file; keeping the existing setup." >&2
+    exit 0
+fi
+if ! {
+    for server in "${additions[@]}"; do
+        printf 'nameserver %s\n' "$server"
+    done
+    cat "$resolv_file"
+} >"$tmp_file"; then
+    rm -f "$tmp_file"
+    echo "[resolv-config] Could not read ${resolv_file}; keeping the existing setup." >&2
+    exit 0
+fi
+
+if mv -f "$tmp_file" "$resolv_file" 2>/dev/null; then
+    printf '[resolv-config] Added nameserver%s: %s\n' \
+        "$([ "${#additions[@]}" -gt 1 ] && printf 's' || true)" \
+        "$(printf '%s ' "${additions[@]}" | sed 's/[[:space:]]*$//')"
+elif cat "$tmp_file" >"$resolv_file" 2>/dev/null; then
+    rm -f "$tmp_file"
+    printf '[resolv-config] Updated nameserver%s in place: %s\n' \
+        "$([ "${#additions[@]}" -gt 1 ] && printf 's' || true)" \
+        "$(printf '%s ' "${additions[@]}" | sed 's/[[:space:]]*$//')"
+else
+    rm -f "$tmp_file"
+    echo "[resolv-config] Could not replace ${resolv_file}; keeping the existing setup." >&2
+fi

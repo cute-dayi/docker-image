@@ -9,6 +9,8 @@ RUNTIME_AUTHORIZED_KEYS=/run/sshd/authorized_keys
 
 echo -e "${GREEN}[init-root] Starting initialization...${NC}"
 
+/usr/local/bin/configure-resolv
+
 if [ ! -f "/root/.bashrc" ]; then
     echo -e "${GREEN}[init-root] /root appears empty or mounted. Restoring from backup...${NC}"
     tar -xzf "$BACKUP_FILE" -C / --keep-newer-files 2>/dev/null || true

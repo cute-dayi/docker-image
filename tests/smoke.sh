@@ -24,7 +24,7 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     set -e
     command -v /init sshd code-server uv tailscale tailscaled cloudflared nginx openssl \
         /usr/local/bin/docker-image-banner \
-        /usr/local/bin/dev /usr/local/bin/update-status \
+        /usr/local/bin/configure-resolv /usr/local/bin/dev /usr/local/bin/update-status \
         docker dockerd dockerd-rootless.sh newuidmap newgidmap \
         slirp4netns fuse-overlayfs ldd \
         htop jq lsof ncdu tree dig mtr tcpdump rsync socat pstree strace \
@@ -40,6 +40,7 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     bash -n /etc/s6-overlay/scripts/init-root \
         /etc/s6-overlay/scripts/configure-nginx \
         /etc/s6-overlay/scripts/configure-tailscale \
+        /usr/local/bin/configure-resolv \
         /usr/local/bin/docker-image-banner \
         /usr/local/bin/dev /usr/local/bin/update-status \
         /etc/s6-overlay/s6-rc.d/runtime-status/run \
@@ -47,6 +48,25 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
         /etc/s6-overlay/s6-rc.d/dockerd-rootless/run \
         /etc/s6-overlay/s6-rc.d/nginx/run \
         /etc/s6-overlay/s6-rc.d/tailscaled/run
+    resolv_test_file="$(mktemp)"
+    printf 'nameserver 9.9.9.9\n' >"$resolv_test_file"
+    resolv_before="$(sha256sum "$resolv_test_file")"
+    RESOLV_CONFIG_FILE="$resolv_test_file" RESOLV_AUTO_CONFIG=false \
+        /usr/local/bin/configure-resolv >/dev/null
+    [ "$resolv_before" = "$(sha256sum "$resolv_test_file")" ]
+    rm -f "$resolv_test_file"
+    resolv_test_dir="$(mktemp -d)"
+    resolv_test_file="$resolv_test_dir/resolv.conf"
+    printf "search internal.example\nnameserver 9.9.9.9\n" >"$resolv_test_file"
+    printf "#!/bin/sh\necho \\;\\; SERVER:\n" >"$resolv_test_dir/dig"
+    chmod 755 "$resolv_test_dir/dig"
+    PATH="$resolv_test_dir:$PATH" \
+        RESOLV_CONFIG_FILE="$resolv_test_file" \
+        /usr/local/bin/configure-resolv >/dev/null
+    grep -q "^nameserver 127.0.0.1$" "$resolv_test_file"
+    grep -q "^nameserver 1.1.1.1$" "$resolv_test_file"
+    [ "$(grep -c "^nameserver 9.9.9.9$" "$resolv_test_file")" = 1 ]
+    rm -rf "$resolv_test_dir"
     banner="$(NGINX_SERVER_NAMES=code.example.test \
         NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
         /usr/local/bin/docker-image-banner)"

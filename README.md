@@ -12,6 +12,7 @@
 - `uv`：Python 包管理/运行工具
 - `Node.js`、`npm`、`npx`：JavaScript/TypeScript 运行与包管理
 - `SSHFS`：通过 SSH 挂载远程目录
+- Mihomo 共享网络场景下的 DNS 探测与安全补充
 - 常用工具：`git`、`curl`、`wget`、`vim`、`tmux`、`ping`、`iproute2`、`net-tools`、`traceroute`、`procps`，以及常用维护工具
 
 镜像使用 `/init` 作为 PID 1。启动时会恢复空的 `/root` 卷、更新 GitHub SSH 公钥、生成 SSH host keys 和默认 TLS 证书，然后由 s6-overlay 分别管理 `sshd`、`code-server`、`nginx`、可选的 `tailscaled` 和 rootless `dockerd`。
@@ -78,6 +79,25 @@ fusermount3 -u /workspace/remote
 ```
 
 如果宿主机的 seccomp 或 AppArmor 策略仍阻止 FUSE 挂载，需要按宿主机安全策略额外放行；不要把 `--privileged` 作为 SSHFS 的默认参数。
+
+### Mihomo 共享网络与 DNS
+
+在 `network_mode: "container:mihomo..."` 的 Compose 场景，镜像启动时会检查正确的 DNS 配置文件 `/etc/resolv.conf`，并探测 `RESOLV_LOCAL_NAMESERVER:53` 与 `RESOLV_FALLBACK_NAMESERVER:53` 是否真的响应。默认行为是：只有确认 `127.0.0.1:53` 有响应时，才把它放到前面；如果 `1.1.1.1:53` 也可用，则一并补入。原有 `nameserver`、`search` 和 `options` 内容会保留。
+
+普通 Docker 容器不会因为这个功能被强制改成公共 DNS：如果没有检测到本地 Mihomo DNS，默认保留 Docker 注入的 DNS（通常是 `127.0.0.11`）。确实需要在本地 DNS 不响应时也尝试 `1.1.1.1`，可设置 `RESOLV_FALLBACK_ALWAYS=true`。对于 Docker 的文件挂载，脚本会在原子替换失败时尝试原地写入；符号链接、只读挂载或无法写入时，只记录提示并保留原文件。
+
+```yaml
+services:
+  ovo:
+    image: ghcr.io/rabbit-dayi/docker-image:latest
+    network_mode: "container:mihomo-px-2-898989"
+    environment:
+      RESOLV_AUTO_CONFIG: "true"
+      RESOLV_LOCAL_NAMESERVER: 127.0.0.1
+      RESOLV_FALLBACK_NAMESERVER: 1.1.1.1
+      # 没有本地 Mihomo DNS 时，也尝试使用 1.1.1.1
+      # RESOLV_FALLBACK_ALWAYS: "true"
+```
 
 ## 镜像地址
 
@@ -402,6 +422,11 @@ docker exec -it docker-image tailscale \
 | `NGINX_UPSTREAM` | `127.0.0.1:8080` | Nginx 根路径反代的 `host:port` 上游；更改 code-server 端口时一并更新。 |
 | `NGINX_SERVICE_LINKS` | 未设置 | 可选的动态内部服务列表，格式为 `名称|/路径|host:port;...`；生成 `/services/` 页面和对应反代路径。 |
 | `STATUS_INTERVAL` | `5` | 状态采样间隔，允许 `1`–`60` 秒。 |
+| `RESOLV_AUTO_CONFIG` | `true` | 是否在启动时探测并补充 DNS；设为 `false` 可完全禁用。 |
+| `RESOLV_LOCAL_NAMESERVER` | `127.0.0.1` | Mihomo 本地 DNS 的 IPv4 地址，探测端口固定为 `53`。 |
+| `RESOLV_FALLBACK_NAMESERVER` | `1.1.1.1` | 公共 DNS 备用 IPv4 地址，探测端口固定为 `53`。 |
+| `RESOLV_FALLBACK_ALWAYS` | `false` | 本地 DNS 未响应时，是否仍探测并添加备用 DNS。 |
+| `RESOLV_CHECK_DOMAIN` | `example.com` | DNS 探测使用的域名。 |
 | `NGINX_TLS_CERT_FILE` | 未设置 | 自定义证书绝对路径；必须与 `NGINX_TLS_KEY_FILE` 一同设置。 |
 | `NGINX_TLS_KEY_FILE` | 未设置 | 自定义未加密私钥绝对路径；必须与 `NGINX_TLS_CERT_FILE` 一同设置。 |
 | `TS_ENABLE` | `false` | 设为严格的 `true` 才启用 Tailscale。 |
@@ -484,6 +509,7 @@ smoke test 会检查：
 - SSH 配置语法和有效的 keepalive/认证设置
 - 默认自签名证书、域名 HTTPS 反代、HTTP 到 HTTPS 跳转，以及挂载自定义 TLS 证书
 - `/services/` 动态跳转页、`/status/` 运行状态页和内部服务前缀反代
+- Mihomo 共享网络下 DNS 探测、禁用开关和现有 `resolv.conf` 保留行为
 - 状态采样服务、`dev` 运维命令和真实服务路由健康检查
 - `/init`、sshd、code-server 和 nginx 的实际运行状态
 - 只读 `authorized_keys` 挂载下的真实 SSH 公钥登录
