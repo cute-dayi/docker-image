@@ -11,6 +11,7 @@
 - `Docker CLI`、Buildx、Compose plugin，以及可选的 rootless Docker-in-Docker daemon
 - `uv`：Python 包管理/运行工具
 - `Node.js`、`npm`、`npx`：JavaScript/TypeScript 运行与包管理
+- `SSHFS`：通过 SSH 挂载远程目录
 - 常用工具：`git`、`curl`、`wget`、`vim`、`tmux`、`ping`、`iproute2`、`net-tools`、`traceroute`、`procps`，以及常用维护工具
 
 镜像使用 `/init` 作为 PID 1。启动时会恢复空的 `/root` 卷、更新 GitHub SSH 公钥、生成 SSH host keys 和默认 TLS 证书，然后由 s6-overlay 分别管理 `sshd`、`code-server`、`nginx`、可选的 `tailscaled` 和 rootless `dockerd`。
@@ -29,6 +30,34 @@
 `tcpdump` 抓包需要容器具备 `NET_RAW` 能力；受默认 seccomp 或 ptrace 限制的运行环境中，`strace` 可能需要额外授予调试权限。
 
 `cloudflared` 已预装，可按需用 `cloudflared tunnel` 命令运行 Cloudflare Tunnel；镜像不会在未提供 tunnel 配置或令牌时自动启动它。
+
+### SSHFS 远程目录
+
+镜像预装 `sshfs` 和 `fusermount3`。启动容器时需要把宿主机的 FUSE 设备和挂载能力传入容器：
+
+```bash
+docker run -d \
+  --name docker-image-sshfs \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  -e GITHUB_USER=rabbit-dayi \
+  -e PASSWORD='change-this-password' \
+  -p 2222:22 \
+  -p 80:80 \
+  -p 443:443 \
+  ghcr.io/rabbit-dayi/docker-image:latest
+```
+
+进入容器后即可挂载远程目录，挂载点也能直接被 code-server 使用：
+
+```bash
+mkdir -p /workspace/remote
+sshfs -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 \
+  user@example.com:/srv/data /workspace/remote
+fusermount3 -u /workspace/remote
+```
+
+如果宿主机的 seccomp 或 AppArmor 策略仍阻止 FUSE 挂载，需要按宿主机安全策略额外放行；不要把 `--privileged` 作为 SSHFS 的默认参数。
 
 ## 镜像地址
 

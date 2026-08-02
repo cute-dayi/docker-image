@@ -26,6 +26,7 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
         docker dockerd dockerd-rootless.sh newuidmap newgidmap \
         slirp4netns fuse-overlayfs ldd \
         htop jq lsof ncdu tree dig mtr tcpdump rsync socat pstree strace \
+        sshfs fusermount3 \
         node npm npx >/dev/null
     test -x /usr/bin/true
     command -v docker-rootlesskit >/dev/null || command -v rootlesskit >/dev/null

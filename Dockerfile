@@ -48,7 +48,7 @@ RUN set -eux; \
       inetutils-ping iproute2 net-tools traceroute procps \
       htop jq lsof ncdu tree dnsutils mtr-tiny tcpdump rsync socat psmisc strace \
       nodejs npm \
-      fuse-overlayfs slirp4netns uidmap nginx-light openssl; \
+      fuse-overlayfs sshfs slirp4netns uidmap nginx-light openssl; \
     install -m 0755 -d /etc/apt/keyrings; \
     curl -fsSL --retry 3 --retry-all-errors \
       https://download.docker.com/linux/debian/gpg \
