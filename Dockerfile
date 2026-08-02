@@ -29,11 +29,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DOCKERD_ROOTLESS_ENABLE=false \
     DOCKER_HOST=unix:///run/user/1000/docker.sock \
     STARTUP_BANNER=true \
-    RESOLV_AUTO_CONFIG=true \
-    RESOLV_LOCAL_NAMESERVER=127.0.0.1 \
-    RESOLV_FALLBACK_NAMESERVER=1.1.1.1 \
-    RESOLV_FALLBACK_ALWAYS=false \
-    RESOLV_CHECK_DOMAIN=example.com \
+    RESOLV_WEB_ENABLE=true \
+    RESOLV_WEB_PORT=8787 \
     STATUS_INTERVAL=5
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -148,8 +145,10 @@ RUN set -eux; \
       /etc/s6-overlay/scripts/configure-nginx \
       /etc/s6-overlay/scripts/configure-tailscale \
       /etc/s6-overlay/s6-rc.d/runtime-status/run \
+      /etc/s6-overlay/s6-rc.d/resolver-web/run \
       /usr/local/bin/docker-image-banner \
       /usr/local/bin/configure-resolv \
+      /usr/local/bin/resolver-web.js \
       /usr/local/bin/dev \
       /usr/local/bin/update-status \
       /etc/s6-overlay/s6-rc.d/sshd/run \

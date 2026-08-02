@@ -12,10 +12,10 @@
 - `uv`：Python 包管理/运行工具
 - `Node.js`、`npm`、`npx`：JavaScript/TypeScript 运行与包管理
 - `SSHFS`：通过 SSH 挂载远程目录
-- Mihomo 共享网络场景下的 DNS 探测与安全补充
+- Mihomo 共享网络场景下的 DNS 探测、测试页面与安全补充
 - 常用工具：`git`、`curl`、`wget`、`vim`、`tmux`、`ping`、`iproute2`、`net-tools`、`traceroute`、`procps`，以及常用维护工具
 
-镜像使用 `/init` 作为 PID 1。启动时会恢复空的 `/root` 卷、更新 GitHub SSH 公钥、生成 SSH host keys 和默认 TLS 证书，然后由 s6-overlay 分别管理 `sshd`、`code-server`、`nginx`、可选的 `tailscaled` 和 rootless `dockerd`。
+镜像使用 `/init` 作为 PID 1。启动时会恢复空的 `/root` 卷、读取持久化 DNS 配置、更新 GitHub SSH 公钥、生成 SSH host keys 和默认 TLS 证书，然后由 s6-overlay 分别管理 `sshd`、`code-server`、`nginx`、DNS 管理页、可选的 `tailscaled` 和 rootless `dockerd`。
 
 普通 SSH/code-server 模式不需要 `privileged`、systemd、`/sys/fs/cgroup` 或 Compose 的 `init: true`。启用 Tailscale 内核网络时才需要 `/dev/net/tun`、`NET_ADMIN` 和 `NET_RAW`；启用 rootless Docker-in-Docker 时需要外层容器使用 `--privileged`，具体原因和使用方式见下文。
 
@@ -86,6 +86,10 @@ fusermount3 -u /workspace/remote
 
 普通 Docker 容器不会因为这个功能被强制改成公共 DNS：如果没有检测到本地 Mihomo DNS，默认保留 Docker 注入的 DNS（通常是 `127.0.0.11`）。确实需要在本地 DNS 不响应时也尝试 `1.1.1.1`，可设置 `RESOLV_FALLBACK_ALWAYS=true`。对于 Docker 的文件挂载，脚本会在原子替换失败时尝试原地写入；符号链接、只读挂载或无法写入时，只记录提示并保留原文件。
 
+当没有通过环境变量锁定 DNS 参数时，可访问 `https://<域名>/dns/` 打开 DNS 管理页，填写参数后执行“测试 DNS”或“保存并应用”。配置默认持久化到 `/root/.config/docker-image/resolver.json`，因此挂载 `/root` 后重建容器仍会保留。设置 `RESOLV_AUTO_CONFIG`、`RESOLV_LOCAL_NAMESERVER`、`RESOLV_FALLBACK_NAMESERVER`、`RESOLV_FALLBACK_ALWAYS` 或 `RESOLV_CHECK_DOMAIN` 后，对应字段由环境变量控制，页面不会覆盖它们。
+
+管理页优先使用 `RESOLV_WEB_PASSWORD` 生成 Nginx Basic Auth；未设置时使用已有的 `PASSWORD`。如果两者都没有，页面不会启用认证，不应直接暴露到公网。
+
 ```yaml
 services:
   ovo:
@@ -151,7 +155,7 @@ volumes:
 
 ## Nginx HTTPS 统一入口
 
-Nginx 默认启用，是容器 Web 服务的统一对外入口：容器内 code-server 默认只绑定 `127.0.0.1:8080`，HTTP `80` 会以 `308` 重定向到 HTTPS `443`。Nginx 会转发 WebSocket 和 `X-Forwarded-*` 头，因此可以直接用浏览器访问 code-server；`/services/` 提供内部服务跳转页，`/status/` 提供自动刷新的运行状态页。
+Nginx 默认启用，是容器 Web 服务的统一对外入口：容器内 code-server 默认只绑定 `127.0.0.1:8080`，HTTP `80` 会以 `308` 重定向到 HTTPS `443`。Nginx 会转发 WebSocket 和 `X-Forwarded-*` 头，因此可以直接用浏览器访问 code-server；`/services/` 提供内部服务跳转页，`/status/` 提供自动刷新的运行状态页，`/dns/` 提供 DNS 测试和持久化配置页。
 
 SSH 仍独立使用 `22` 端口。正常部署只需映射 `22`、`80` 和 `443`，不要再映射 `8080`。
 
@@ -178,7 +182,7 @@ environment:
   NGINX_SERVICE_LINKS: "Jupyter|/jupyter|127.0.0.1:8888;Grafana|/grafana|127.0.0.1:3000"
 ```
 
-每项格式为 `名称|外部路径|内部host:port`，各项以分号分隔。名称只允许字母、数字、点、下划线和连字符；外部路径必须以 `/` 开头且不能有结尾 `/`。`/services`、`/status` 和 `/status.json` 是镜像保留路径，不能作为自定义服务路径。Nginx 会去掉外部路径前缀，例如 `/jupyter/tree` 会转发为 `http://127.0.0.1:8888/tree`，并补充 `X-Forwarded-Prefix`。如果上游服务生成绝对根路径链接，需要按该服务的方式设置它的 base URL。修改该变量后重启容器即可刷新页面和路由。
+每项格式为 `名称|外部路径|内部host:port`，各项以分号分隔。名称只允许字母、数字、点、下划线和连字符；外部路径必须以 `/` 开头且不能有结尾 `/`。`/services`、`/status`、`/status.json` 和 `/dns` 是镜像保留路径，不能作为自定义服务路径。Nginx 会去掉外部路径前缀，例如 `/jupyter/tree` 会转发为 `http://127.0.0.1:8888/tree`，并补充 `X-Forwarded-Prefix`。如果上游服务生成绝对根路径链接，需要按该服务的方式设置它的 base URL。修改该变量后重启容器即可刷新页面和路由。
 
 ### 运行状态页
 
@@ -422,6 +426,10 @@ docker exec -it docker-image tailscale \
 | `NGINX_UPSTREAM` | `127.0.0.1:8080` | Nginx 根路径反代的 `host:port` 上游；更改 code-server 端口时一并更新。 |
 | `NGINX_SERVICE_LINKS` | 未设置 | 可选的动态内部服务列表，格式为 `名称|/路径|host:port;...`；生成 `/services/` 页面和对应反代路径。 |
 | `STATUS_INTERVAL` | `5` | 状态采样间隔，允许 `1`–`60` 秒。 |
+| `RESOLV_WEB_ENABLE` | `true` | 是否启用 `/dns/` DNS 管理页和本地 API。 |
+| `RESOLV_WEB_PORT` | `8787` | DNS 管理 API 仅监听容器内 `127.0.0.1` 的端口。 |
+| `RESOLV_WEB_PASSWORD` | 未设置 | DNS 管理页的 Basic Auth 密码；未设置时回退使用 `PASSWORD`。 |
+| `RESOLV_STATE_FILE` | `/root/.config/docker-image/resolver.json` | DNS 页面保存的持久化配置文件。 |
 | `RESOLV_AUTO_CONFIG` | `true` | 是否在启动时探测并补充 DNS；设为 `false` 可完全禁用。 |
 | `RESOLV_LOCAL_NAMESERVER` | `127.0.0.1` | Mihomo 本地 DNS 的 IPv4 地址，探测端口固定为 `53`。 |
 | `RESOLV_FALLBACK_NAMESERVER` | `1.1.1.1` | 公共 DNS 备用 IPv4 地址，探测端口固定为 `53`。 |
@@ -509,6 +517,7 @@ smoke test 会检查：
 - SSH 配置语法和有效的 keepalive/认证设置
 - 默认自签名证书、域名 HTTPS 反代、HTTP 到 HTTPS 跳转，以及挂载自定义 TLS 证书
 - `/services/` 动态跳转页、`/status/` 运行状态页和内部服务前缀反代
+- `/dns/` DNS 管理页的测试、持久化和环境变量覆盖行为
 - Mihomo 共享网络下 DNS 探测、禁用开关和现有 `resolv.conf` 保留行为
 - 状态采样服务、`dev` 运维命令和真实服务路由健康检查
 - `/init`、sshd、code-server 和 nginx 的实际运行状态

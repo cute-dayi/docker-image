@@ -66,6 +66,16 @@ upstream="$(normalize_upstream "${NGINX_UPSTREAM:-127.0.0.1:8080}")" \
 portal_path=/services
 status_path=/status
 status_json_path=/status.json
+dns_path=/dns
+dns_api_path=/dns/api
+dns_web_enabled="${RESOLV_WEB_ENABLE:-true}"
+case "$dns_web_enabled" in
+    true|false) ;;
+    *) fail "RESOLV_WEB_ENABLE must be true or false." ;;
+esac
+dns_port="${RESOLV_WEB_PORT:-8787}"
+validate_port "$dns_port" || fail "RESOLV_WEB_PORT must be between 1 and 65535."
+dns_port=$((10#$dns_port))
 service_links="${NGINX_SERVICE_LINKS:-}"
 declare -a service_names=()
 declare -a service_paths=()
@@ -91,6 +101,8 @@ if [ -n "$service_links" ]; then
         [ "$service_path" != "$portal_path" ] \
             && [ "$service_path" != "$status_path" ] \
             && [ "$service_path" != "$status_json_path" ] \
+            && [ "$service_path" != "$dns_path" ] \
+            && [[ "$service_path" != "$dns_path"/* ]] \
             || fail "Service path ${service_path} is reserved for a built-in endpoint."
         service_upstream="$(normalize_upstream "$service_upstream")" \
             || fail "Service ${service_name} must use a safe host:port upstream."
@@ -183,8 +195,25 @@ portal_file="${portal_dir}/index.html"
 status_dir="${runtime_dir}/status"
 status_file="${status_dir}/status.json"
 status_page="${status_dir}/index.html"
+dns_dir="${runtime_dir}/dns"
+dns_page="${dns_dir}/index.html"
+dns_auth_file="${runtime_dir}/resolver.htpasswd"
 install -d -m 0755 "$portal_dir"
 install -d -m 0755 "$status_dir"
+if [ "$dns_web_enabled" = true ]; then
+    install -d -m 0755 "$dns_dir"
+    install -m 0644 /usr/local/share/docker-image/resolver.html "$dns_page"
+    dns_password="${RESOLV_WEB_PASSWORD:-${PASSWORD:-}}"
+    if [ -n "$dns_password" ]; then
+        dns_password_hash="$(openssl passwd -apr1 "$dns_password")" \
+            || fail "Could not generate the DNS page password file."
+        printf 'admin:%s\n' "$dns_password_hash" >"$dns_auth_file"
+        chmod 0640 "$dns_auth_file"
+        chown root:www-data "$dns_auth_file"
+    else
+        rm -f "$dns_auth_file"
+    fi
+fi
 cat >"$portal_file" <<'EOF'
 <!doctype html>
 <html lang="en">
@@ -222,6 +251,10 @@ for service_index in "${!service_names[@]}"; do
         >>"$portal_file"
 done
 printf '      <a class="service service-secondary" href="/status/"><strong>Runtime status</strong><span>/status/</span></a>\n' >>"$portal_file"
+if [ "$dns_web_enabled" = true ]; then
+    printf '      <a class="service service-secondary" href="%s/"><strong>DNS settings</strong><span>%s/</span></a>\n' \
+        "$dns_path" "$dns_path" >>"$portal_file"
+fi
 cat >>"$portal_file" <<'EOF'
     </section>
   </main>
@@ -328,6 +361,15 @@ cat >"$status_file" <<'EOF'
 EOF
 chmod 0644 "$status_page" "$status_file"
 
+write_dns_auth() {
+    if [ -s "$dns_auth_file" ]; then
+        cat >>"$config_file" <<EOF
+            auth_basic "DNS settings";
+            auth_basic_user_file ${dns_auth_file};
+EOF
+    fi
+}
+
 write_service_locations() {
     local protocol=$1
     local service_index
@@ -364,6 +406,43 @@ write_service_locations() {
             add_header Cache-Control "no-store";
         }
 EOF
+
+    if [ "$dns_web_enabled" = true ]; then
+        cat >>"$config_file" <<EOF
+        location = ${dns_path} {
+            return 308 ${dns_path}/;
+        }
+
+        location = ${dns_api_path} {
+            return 308 ${dns_api_path}/;
+        }
+
+        location = ${dns_path}/ {
+            root ${runtime_dir};
+            try_files ${dns_path}/index.html =404;
+            default_type text/html;
+            add_header Cache-Control "no-store";
+EOF
+        write_dns_auth
+        cat >>"$config_file" <<EOF
+        }
+
+        location ^~ ${dns_api_path}/ {
+            proxy_pass http://127.0.0.1:${dns_port}/api/;
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+            proxy_buffering off;
+            proxy_read_timeout 10s;
+            proxy_send_timeout 10s;
+EOF
+        write_dns_auth
+        cat >>"$config_file" <<EOF
+        }
+EOF
+    fi
 
     for service_index in "${!service_paths[@]}"; do
         service_path="${service_paths[$service_index]}"

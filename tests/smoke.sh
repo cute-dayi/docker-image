@@ -24,7 +24,8 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     set -e
     command -v /init sshd code-server uv tailscale tailscaled cloudflared nginx openssl \
         /usr/local/bin/docker-image-banner \
-        /usr/local/bin/configure-resolv /usr/local/bin/dev /usr/local/bin/update-status \
+        /usr/local/bin/configure-resolv /usr/local/bin/resolver-web.js \
+        /usr/local/bin/dev /usr/local/bin/update-status \
         docker dockerd dockerd-rootless.sh newuidmap newgidmap \
         slirp4netns fuse-overlayfs ldd \
         htop jq lsof ncdu tree dig mtr tcpdump rsync socat pstree strace \
@@ -48,6 +49,7 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
         /etc/s6-overlay/s6-rc.d/dockerd-rootless/run \
         /etc/s6-overlay/s6-rc.d/nginx/run \
         /etc/s6-overlay/s6-rc.d/tailscaled/run
+    node --check /usr/local/bin/resolver-web.js
     resolv_test_file="$(mktemp)"
     printf 'nameserver 9.9.9.9\n' >"$resolv_test_file"
     resolv_before="$(sha256sum "$resolv_test_file")"
@@ -72,10 +74,12 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
         /usr/local/bin/docker-image-banner)"
     printf '%s\n' "$banner" | grep -Fq 'DOCKER IMAGE'
     printf '%s\n' "$banner" | grep -Fq 'https://code.example.test:443/services/'
+    printf '%s\n' "$banner" | grep -Fq 'https://code.example.test:443/dns/'
     [ -z "$(STARTUP_BANNER=false /usr/local/bin/docker-image-banner)" ]
     /usr/local/bin/dev help | grep -Fq 'status'
     NGINX_SERVER_NAMES=code.example.test \
         NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
+        RESOLV_WEB_PASSWORD=smoke-secret \
         /etc/s6-overlay/scripts/configure-nginx
     nginx -t -q -c /run/nginx/nginx.conf
     openssl x509 -in /run/nginx/default-certificate/tls.crt -noout -ext subjectAltName \
@@ -86,6 +90,11 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     grep -Fq "href=\"/status/\"" /run/nginx/services/index.html
     grep -Fq "location = /status/" /run/nginx/nginx.conf
     grep -Fq status.json /run/nginx/status/index.html
+    grep -Fq "location = /dns/" /run/nginx/nginx.conf
+    grep -Fq "location ^~ /dns/api/" /run/nginx/nginx.conf
+    grep -Fq "auth_basic_user_file /run/nginx/resolver.htpasswd;" /run/nginx/nginx.conf
+    test "$(stat -c "%a %U %G" /run/nginx/resolver.htpasswd)" = "640 root www-data"
+    test -s /run/nginx/dns/index.html
     test -s /run/nginx/status/status.json
     STATUS_ONCE=true \
         NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
@@ -118,6 +127,11 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     if NGINX_SERVICE_LINKS="bad|/status.json|127.0.0.1:8080" \
         /etc/s6-overlay/scripts/configure-nginx >/dev/null 2>&1; then
         echo "Reserved status JSON path was accepted" >&2
+        exit 1
+    fi
+    if NGINX_SERVICE_LINKS="bad|/dns|127.0.0.1:8080" \
+        /etc/s6-overlay/scripts/configure-nginx >/dev/null 2>&1; then
+        echo "Reserved DNS path was accepted" >&2
         exit 1
     fi
     sshd -t
@@ -205,6 +219,21 @@ status_json="$(curl --noproxy '*' -fkS \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/status.json")"
 printf '%s\n' "$status_json" | jq -e '.services | map(select(.name == "Echo")) | length == 1' >/dev/null
+dns_page="$(curl --noproxy '*' -fkS \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/dns/")"
+printf '%s\n' "$dns_page" | grep -Fq 'id="resolver-form"'
+dns_json="$(curl --noproxy '*' -fkS \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/dns/api/resolver")"
+printf '%s\n' "$dns_json" | jq -e '.config.local_nameserver == "127.0.0.1"' >/dev/null
+dns_apply="$(curl --noproxy '*' -fkS -X POST \
+    -H 'Content-Type: application/json' \
+    --data '{"auto_config":false,"local_nameserver":"127.0.0.1","fallback_nameserver":"1.1.1.1","fallback_always":false,"check_domain":"example.com"}' \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/dns/api/resolver/apply")"
+printf '%s\n' "$dns_apply" | jq -e '.applied == true' >/dev/null
+docker exec "$container" jq -e '.auto_config == false' /root/.config/docker-image/resolver.json >/dev/null
 docker exec "$container" dev status | grep -Fq 'components:'
 docker exec "$container" dev routes | grep -Fq 'Echo'
 docker exec "$container" pgrep -x sshd >/dev/null

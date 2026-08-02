@@ -1,7 +1,26 @@
 #!/bin/bash
 set -euo pipefail
 
-case "${RESOLV_AUTO_CONFIG:-true}" in
+state_file="${RESOLV_STATE_FILE:-/root/.config/docker-image/resolver.json}"
+state_value() {
+    local query=$1
+    [ -r "$state_file" ] && command -v jq >/dev/null 2>&1 || return 0
+    jq -r "$query" "$state_file" 2>/dev/null || true
+}
+
+persisted_auto="$(state_value '.auto_config | select(type == "boolean") | tostring')"
+persisted_local="$(state_value '.local_nameserver | strings')"
+persisted_fallback="$(state_value '.fallback_nameserver | strings')"
+persisted_domain="$(state_value '.check_domain | strings')"
+persisted_fallback_always="$(state_value '.fallback_always | select(type == "boolean") | tostring')"
+
+if [ -n "${RESOLV_AUTO_CONFIG+x}" ]; then
+    auto_config="$RESOLV_AUTO_CONFIG"
+else
+    auto_config="${persisted_auto:-true}"
+fi
+
+case "$auto_config" in
     true) ;;
     false)
         echo "[resolv-config] Automatic resolver configuration disabled."
@@ -14,10 +33,26 @@ case "${RESOLV_AUTO_CONFIG:-true}" in
 esac
 
 resolv_file="${RESOLV_CONFIG_FILE:-/etc/resolv.conf}"
-local_server="${RESOLV_LOCAL_NAMESERVER:-127.0.0.1}"
-fallback_server="${RESOLV_FALLBACK_NAMESERVER:-1.1.1.1}"
-check_domain="${RESOLV_CHECK_DOMAIN:-example.com}"
-fallback_always="${RESOLV_FALLBACK_ALWAYS:-false}"
+if [ -n "${RESOLV_LOCAL_NAMESERVER+x}" ]; then
+    local_server="$RESOLV_LOCAL_NAMESERVER"
+else
+    local_server="${persisted_local:-127.0.0.1}"
+fi
+if [ -n "${RESOLV_FALLBACK_NAMESERVER+x}" ]; then
+    fallback_server="$RESOLV_FALLBACK_NAMESERVER"
+else
+    fallback_server="${persisted_fallback:-1.1.1.1}"
+fi
+if [ -n "${RESOLV_CHECK_DOMAIN+x}" ]; then
+    check_domain="$RESOLV_CHECK_DOMAIN"
+else
+    check_domain="${persisted_domain:-example.com}"
+fi
+if [ -n "${RESOLV_FALLBACK_ALWAYS+x}" ]; then
+    fallback_always="$RESOLV_FALLBACK_ALWAYS"
+else
+    fallback_always="${persisted_fallback_always:-false}"
+fi
 
 valid_server() {
     local value=$1

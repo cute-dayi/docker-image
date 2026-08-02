@@ -1,0 +1,9 @@
+#!/bin/bash
+set -euo pipefail
+
+if [ "${RESOLV_WEB_ENABLE:-true}" != "true" ]; then
+    echo "[resolver-web] Disabled. Set RESOLV_WEB_ENABLE=true to enable the DNS page."
+    exec sleep infinity
+fi
+
+exec node /usr/local/bin/resolver-web.js
