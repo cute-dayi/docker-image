@@ -16,6 +16,26 @@ validate_path() {
     [[ "$1" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "$1" != *//* ]]
 }
 
+validate_service_path() {
+    [[ "$1" =~ ^/([A-Za-z0-9_-][A-Za-z0-9._-]*)(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$ ]]
+}
+
+validate_service_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+}
+
+normalize_upstream() {
+    local value=$1
+    local host="${value%:*}"
+    local port="${value##*:}"
+
+    [[ "$value" == *:* ]] \
+        && [[ "$host" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] \
+        && validate_port "$port" \
+        || return 1
+    printf '%s:%d\n' "$host" "$((10#$port))"
+}
+
 enabled="${NGINX_ENABLE:-true}"
 case "$enabled" in
     true) ;;
@@ -40,15 +60,51 @@ http_port=$((10#$http_port))
 https_port=$((10#$https_port))
 [ "$http_port" != "$https_port" ] || fail "NGINX_HTTP_PORT and NGINX_HTTPS_PORT must differ."
 
-upstream="${NGINX_UPSTREAM:-127.0.0.1:8080}"
-upstream_host="${upstream%:*}"
-upstream_port="${upstream##*:}"
-[[ "$upstream" == *:* ]] \
-    && [[ "$upstream_host" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] \
-    && validate_port "$upstream_port" \
+upstream="$(normalize_upstream "${NGINX_UPSTREAM:-127.0.0.1:8080}")" \
     || fail "NGINX_UPSTREAM must be a safe host:port value."
-upstream_port=$((10#$upstream_port))
-upstream="${upstream_host}:${upstream_port}"
+
+portal_path=/services
+service_links="${NGINX_SERVICE_LINKS:-}"
+declare -a service_names=()
+declare -a service_paths=()
+declare -a service_upstreams=()
+
+if [ -n "$service_links" ]; then
+    [[ "$service_links" != \;* ]] \
+        && [[ "$service_links" != *\; ]] \
+        && [[ "$service_links" != *\;\;* ]] \
+        || fail "NGINX_SERVICE_LINKS must be a semicolon-separated service list."
+    IFS=';' read -r -a services <<<"$service_links"
+    for service in "${services[@]}"; do
+        IFS='|' read -r service_name service_path service_upstream extra <<<"$service"
+        [ -n "${service_name:-}" ] \
+            && [ -n "${service_path:-}" ] \
+            && [ -n "${service_upstream:-}" ] \
+            && [ -z "${extra:-}" ] \
+            || fail "Each NGINX_SERVICE_LINKS entry must be name|/path|host:port."
+        validate_service_name "$service_name" \
+            || fail "Service names may only contain letters, numbers, dots, underscores, and hyphens."
+        validate_service_path "$service_path" \
+            || fail "Service paths must be an absolute path without a trailing slash."
+        [ "$service_path" != "$portal_path" ] \
+            || fail "Service path ${portal_path} is reserved for the service portal."
+        service_upstream="$(normalize_upstream "$service_upstream")" \
+            || fail "Service ${service_name} must use a safe host:port upstream."
+
+        for existing_name in "${service_names[@]}"; do
+            [ "$service_name" != "$existing_name" ] \
+                || fail "Service name ${service_name} is defined more than once."
+        done
+        for existing_path in "${service_paths[@]}"; do
+            [ "$service_path" != "$existing_path" ] \
+                || fail "Service path ${service_path} is defined more than once."
+        done
+
+        service_names+=("$service_name")
+        service_paths+=("$service_path")
+        service_upstreams+=("$service_upstream")
+    done
+fi
 
 requested_names="${NGINX_SERVER_NAMES:-_}"
 server_names=""
@@ -118,6 +174,120 @@ openssl pkey -in "$key_file" -noout >/dev/null 2>&1 \
     || fail "NGINX_TLS_KEY_FILE is not a readable private key."
 
 install -d -m 0755 "$runtime_dir"
+portal_dir="${runtime_dir}/services"
+portal_file="${portal_dir}/index.html"
+install -d -m 0755 "$portal_dir"
+cat >"$portal_file" <<'EOF'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Internal services</title>
+  <style>
+    :root { color: #172324; background: #f4f6f2; font-family: system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 24px; }
+    main { width: min(100%, 720px); }
+    .eyebrow { margin: 0 0 8px; color: #157a6e; font-size: 13px; font-weight: 700; text-transform: uppercase; }
+    h1 { margin: 0 0 24px; font-size: 28px; font-weight: 700; }
+    .services { display: grid; gap: 10px; }
+    .service { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 64px; padding: 16px; border: 1px solid #c9d5d1; border-radius: 8px; color: inherit; background: #ffffff; text-decoration: none; }
+    .service:hover, .service:focus-visible { border-color: #157a6e; outline: 2px solid #157a6e; outline-offset: 2px; }
+    .service strong { overflow-wrap: anywhere; }
+    .service span { color: #51605d; font-family: ui-monospace, monospace; font-size: 13px; overflow-wrap: anywhere; text-align: right; }
+    @media (max-width: 480px) { body { padding: 16px; } .service { align-items: flex-start; flex-direction: column; gap: 6px; } .service span { text-align: left; } }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">Gateway</p>
+    <h1>Internal services</h1>
+    <section class="services" aria-label="Internal services">
+EOF
+printf '      <a class="service" href="/"><strong>code-server</strong><span>/</span></a>\n' >>"$portal_file"
+for service_index in "${!service_names[@]}"; do
+    printf '      <a class="service" href="%s/"><strong>%s</strong><span>%s/</span></a>\n' \
+        "${service_paths[$service_index]}" \
+        "${service_names[$service_index]}" \
+        "${service_paths[$service_index]}" \
+        >>"$portal_file"
+done
+cat >>"$portal_file" <<'EOF'
+    </section>
+  </main>
+</body>
+</html>
+EOF
+chmod 0644 "$portal_file"
+
+write_service_locations() {
+    local protocol=$1
+    local service_index
+    local service_path
+    local service_upstream
+
+    cat >>"$config_file" <<EOF
+        location = ${portal_path} {
+            return 308 ${portal_path}/;
+        }
+
+        location = ${portal_path}/ {
+            root ${runtime_dir};
+            try_files ${portal_path}/index.html =404;
+            default_type text/html;
+            add_header Cache-Control "no-store";
+        }
+EOF
+
+    for service_index in "${!service_paths[@]}"; do
+        service_path="${service_paths[$service_index]}"
+        service_upstream="${service_upstreams[$service_index]}"
+        cat >>"$config_file" <<EOF
+        location = ${service_path} {
+            return 308 ${service_path}/;
+        }
+
+        location ^~ ${service_path}/ {
+            proxy_pass http://${service_upstream}/;
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Host \$host;
+            proxy_set_header X-Forwarded-Proto ${protocol};
+            proxy_set_header X-Forwarded-Prefix ${service_path};
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \$connection_upgrade;
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+EOF
+    done
+}
+
+write_default_proxy_location() {
+    local protocol=$1
+
+    cat >>"$config_file" <<EOF
+        location / {
+            proxy_pass http://${upstream};
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Host \$host;
+            proxy_set_header X-Forwarded-Proto ${protocol};
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection \$connection_upgrade;
+            proxy_buffering off;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+EOF
+}
+
 redirect_authority='$host'
 if [ "$https_port" != 443 ]; then
     redirect_authority="\$host:${https_port}"
@@ -154,22 +324,8 @@ EOF
 if [ "$http_redirect" = "true" ]; then
     printf '        return 308 https://%s$request_uri;\n' "$redirect_authority" >>"$config_file"
 else
-    cat >>"$config_file" <<EOF
-        location / {
-            proxy_pass http://${upstream};
-            proxy_http_version 1.1;
-            proxy_set_header Host \$host;
-            proxy_set_header X-Real-IP \$remote_addr;
-            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Host \$host;
-            proxy_set_header X-Forwarded-Proto http;
-            proxy_set_header Upgrade \$http_upgrade;
-            proxy_set_header Connection \$connection_upgrade;
-            proxy_buffering off;
-            proxy_read_timeout 3600s;
-            proxy_send_timeout 3600s;
-        }
-EOF
+    write_service_locations http
+    write_default_proxy_location http
 fi
 
 cat >>"$config_file" <<EOF
@@ -185,21 +341,12 @@ cat >>"$config_file" <<EOF
         ssl_protocols TLSv1.2 TLSv1.3;
         ssl_session_cache shared:TLS:10m;
         ssl_session_timeout 10m;
+EOF
 
-        location / {
-            proxy_pass http://${upstream};
-            proxy_http_version 1.1;
-            proxy_set_header Host \$host;
-            proxy_set_header X-Real-IP \$remote_addr;
-            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Host \$host;
-            proxy_set_header X-Forwarded-Proto https;
-            proxy_set_header Upgrade \$http_upgrade;
-            proxy_set_header Connection \$connection_upgrade;
-            proxy_buffering off;
-            proxy_read_timeout 3600s;
-            proxy_send_timeout 3600s;
-        }
+write_service_locations https
+write_default_proxy_location https
+
+cat >>"$config_file" <<EOF
     }
 }
 EOF

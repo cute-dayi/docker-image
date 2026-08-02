@@ -41,10 +41,15 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
         /etc/s6-overlay/s6-rc.d/dockerd-rootless/run \
         /etc/s6-overlay/s6-rc.d/nginx/run \
         /etc/s6-overlay/s6-rc.d/tailscaled/run
-    NGINX_SERVER_NAMES=code.example.test /etc/s6-overlay/scripts/configure-nginx
+    NGINX_SERVER_NAMES=code.example.test \
+        NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
+        /etc/s6-overlay/scripts/configure-nginx
     nginx -t -q -c /run/nginx/nginx.conf
     openssl x509 -in /run/nginx/default-certificate/tls.crt -noout -ext subjectAltName \
         | grep -q "DNS:code.example.test"
+    grep -Fq "location ^~ /echo/" /run/nginx/nginx.conf
+    grep -Fq "proxy_pass http://127.0.0.1:8080/;" /run/nginx/nginx.conf
+    grep -Fq "href=\"/echo/\"" /run/nginx/services/index.html
     NGINX_HTTP_PORT=8081 NGINX_HTTPS_PORT=8443 \
         /etc/s6-overlay/scripts/configure-nginx
     nginx -t -q -c /run/nginx/nginx.conf
@@ -55,6 +60,11 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     grep -Fq "proxy_set_header X-Forwarded-Proto http;" /run/nginx/nginx.conf
     if NGINX_SERVER_NAMES="bad;name" /etc/s6-overlay/scripts/configure-nginx >/dev/null 2>&1; then
         echo "Invalid NGINX_SERVER_NAMES was accepted" >&2
+        exit 1
+    fi
+    if NGINX_SERVICE_LINKS="bad|/services|127.0.0.1:8080" \
+        /etc/s6-overlay/scripts/configure-nginx >/dev/null 2>&1; then
+        echo "Reserved NGINX_SERVICE_LINKS path was accepted" >&2
         exit 1
     fi
     sshd -t
@@ -79,6 +89,7 @@ docker run -d \
     -e GITHUB_USER= \
     -e CODE_SERVER_AUTH=none \
     -e NGINX_SERVER_NAMES=smoke.example.test \
+    -e NGINX_SERVICE_LINKS='Echo|/echo|127.0.0.1:8080' \
     -e TS_ENABLE=false \
     -p 127.0.0.1::22 \
     -p 127.0.0.1::80 \
@@ -112,6 +123,13 @@ done
 curl --noproxy '*' -fkS \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/healthz" >/dev/null
+portal_page="$(curl --noproxy '*' -fkS \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/services/")"
+printf '%s\n' "$portal_page" | grep -Fq 'href="/echo/"'
+curl --noproxy '*' -fkS \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/echo/healthz" >/dev/null
 redirect_headers="$(curl --noproxy '*' -skSI \
     --resolve "smoke.example.test:${http_port}:127.0.0.1" \
     "http://smoke.example.test:${http_port}/healthz" | tr -d '\r')"

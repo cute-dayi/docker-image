@@ -5,7 +5,7 @@
 - `s6-overlay`：作为容器内的 init / supervisor，启动和守护服务
 - `OpenSSH Server`：使用公钥登录，并启用协议层 keepalive
 - `code-server`：在浏览器中使用 VS Code
-- `Nginx`：统一 Web 出口，默认将 HTTP 重定向到 HTTPS，并反代 code-server 的 WebSocket
+- `Nginx`：统一 Web 出口，默认将 HTTP 重定向到 HTTPS，反代 code-server，并提供动态内部服务跳转页
 - `Tailscale`：可选的容器内 tailnet 接入服务
 - `cloudflared`：预装的 Cloudflare Tunnel 客户端，默认不启动
 - `Docker CLI`、Buildx、Compose plugin，以及可选的 rootless Docker-in-Docker daemon
@@ -82,7 +82,7 @@ volumes:
 
 ## Nginx HTTPS 统一入口
 
-Nginx 默认启用，是 code-server 唯一对外的 Web 入口：容器内 code-server 默认只绑定 `127.0.0.1:8080`，HTTP `80` 会以 `308` 重定向到 HTTPS `443`。Nginx 会转发 WebSocket 和 `X-Forwarded-*` 头，因此可以直接用浏览器访问 code-server。
+Nginx 默认启用，是容器 Web 服务的统一对外入口：容器内 code-server 默认只绑定 `127.0.0.1:8080`，HTTP `80` 会以 `308` 重定向到 HTTPS `443`。Nginx 会转发 WebSocket 和 `X-Forwarded-*` 头，因此可以直接用浏览器访问 code-server；`/services/` 则提供内部服务跳转页。
 
 SSH 仍独立使用 `22` 端口。正常部署只需映射 `22`、`80` 和 `443`，不要再映射 `8080`。
 
@@ -99,6 +99,17 @@ ports:
 ```
 
 `NGINX_SERVER_NAMES` 只接受精确域名和 `*.example.com` 形式的通配域名，避免把环境变量直接当作 Nginx 配置注入。未设置时为 `_`，可用于本地访问；默认自签名证书的名称是 `localhost`。
+
+### 内部服务跳转页
+
+访问 `https://<域名>/services/` 可看到服务入口，其中始终包含根路径的 code-server。通过 `NGINX_SERVICE_LINKS` 可以在容器启动时动态增加跳转卡片和对应的 Nginx 反代路径：
+
+```yaml
+environment:
+  NGINX_SERVICE_LINKS: "Jupyter|/jupyter|127.0.0.1:8888;Grafana|/grafana|127.0.0.1:3000"
+```
+
+每项格式为 `名称|外部路径|内部host:port`，各项以分号分隔。名称只允许字母、数字、点、下划线和连字符；外部路径必须以 `/` 开头且不能有结尾 `/`。Nginx 会去掉外部路径前缀，例如 `/jupyter/tree` 会转发为 `http://127.0.0.1:8888/tree`，并补充 `X-Forwarded-Prefix`。如果上游服务生成绝对根路径链接，需要按该服务的方式设置它的 base URL。修改该变量后重启容器即可刷新页面和路由。
 
 ### TLS 证书
 
@@ -335,7 +346,8 @@ docker exec -it docker-image tailscale \
 | `NGINX_HTTPS_PORT` | `443` | Nginx HTTPS 监听端口。 |
 | `NGINX_HTTP_REDIRECT` | `true` | 是否将 HTTP 以 308 重定向到 HTTPS；设为 `false` 时 HTTP 也反代到上游。 |
 | `NGINX_SERVER_NAMES` | `_` | 逗号分隔的精确域名或通配域名，用于 Nginx `server_name` 和默认证书 SAN。 |
-| `NGINX_UPSTREAM` | `127.0.0.1:8080` | Nginx 反代的单个 `host:port` 上游；更改 code-server 端口时一并更新。 |
+| `NGINX_UPSTREAM` | `127.0.0.1:8080` | Nginx 根路径反代的 `host:port` 上游；更改 code-server 端口时一并更新。 |
+| `NGINX_SERVICE_LINKS` | 未设置 | 可选的动态内部服务列表，格式为 `名称|/路径|host:port;...`；生成 `/services/` 页面和对应反代路径。 |
 | `NGINX_TLS_CERT_FILE` | 未设置 | 自定义证书绝对路径；必须与 `NGINX_TLS_KEY_FILE` 一同设置。 |
 | `NGINX_TLS_KEY_FILE` | 未设置 | 自定义未加密私钥绝对路径；必须与 `NGINX_TLS_CERT_FILE` 一同设置。 |
 | `TS_ENABLE` | `false` | 设为严格的 `true` 才启用 Tailscale。 |
@@ -416,6 +428,7 @@ smoke test 会检查：
 - Docker CLI、Buildx、Compose plugin 和 rootless Docker 运行时依赖
 - SSH 配置语法和有效的 keepalive/认证设置
 - 默认自签名证书、域名 HTTPS 反代、HTTP 到 HTTPS 跳转，以及挂载自定义 TLS 证书
+- `/services/` 动态跳转页和内部服务前缀反代
 - `/init`、sshd、code-server 和 nginx 的实际运行状态
 - 只读 `authorized_keys` 挂载下的真实 SSH 公钥登录
 - Tailscale 默认关闭，以及启用但缺少 TUN 时不会影响主服务
