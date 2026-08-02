@@ -64,6 +64,8 @@ upstream="$(normalize_upstream "${NGINX_UPSTREAM:-127.0.0.1:8080}")" \
     || fail "NGINX_UPSTREAM must be a safe host:port value."
 
 portal_path=/services
+status_path=/status
+status_json_path=/status.json
 service_links="${NGINX_SERVICE_LINKS:-}"
 declare -a service_names=()
 declare -a service_paths=()
@@ -87,7 +89,9 @@ if [ -n "$service_links" ]; then
         validate_service_path "$service_path" \
             || fail "Service paths must be an absolute path without a trailing slash."
         [ "$service_path" != "$portal_path" ] \
-            || fail "Service path ${portal_path} is reserved for the service portal."
+            && [ "$service_path" != "$status_path" ] \
+            && [ "$service_path" != "$status_json_path" ] \
+            || fail "Service path ${service_path} is reserved for a built-in endpoint."
         service_upstream="$(normalize_upstream "$service_upstream")" \
             || fail "Service ${service_name} must use a safe host:port upstream."
 
@@ -176,7 +180,11 @@ openssl pkey -in "$key_file" -noout >/dev/null 2>&1 \
 install -d -m 0755 "$runtime_dir"
 portal_dir="${runtime_dir}/services"
 portal_file="${portal_dir}/index.html"
+status_dir="${runtime_dir}/status"
+status_file="${status_dir}/status.json"
+status_page="${status_dir}/index.html"
 install -d -m 0755 "$portal_dir"
+install -d -m 0755 "$status_dir"
 cat >"$portal_file" <<'EOF'
 <!doctype html>
 <html lang="en">
@@ -213,6 +221,7 @@ for service_index in "${!service_names[@]}"; do
         "${service_paths[$service_index]}" \
         >>"$portal_file"
 done
+printf '      <a class="service service-secondary" href="/status/"><strong>Runtime status</strong><span>/status/</span></a>\n' >>"$portal_file"
 cat >>"$portal_file" <<'EOF'
     </section>
   </main>
@@ -220,6 +229,104 @@ cat >>"$portal_file" <<'EOF'
 </html>
 EOF
 chmod 0644 "$portal_file"
+
+cat >"$status_page" <<'EOF'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Runtime status</title>
+  <style>
+    :root { color: #172324; background: #edf2f0; font-family: system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; padding: 24px; }
+    main { width: min(100%, 860px); margin: 0 auto; }
+    header { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
+    .eyebrow { margin: 0 0 8px; color: #157a6e; font-size: 13px; font-weight: 700; text-transform: uppercase; }
+    h1, h2, p { margin-top: 0; }
+    h1 { margin-bottom: 0; font-size: 30px; }
+    h2 { margin-bottom: 0; font-size: 17px; }
+    .back { color: #157a6e; font-weight: 700; text-decoration: none; }
+    .back:hover, .back:focus-visible { text-decoration: underline; }
+    .summary { margin-bottom: 18px; color: #51605d; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 18px; }
+    .component, .panel { border: 1px solid #c9d5d1; border-radius: 8px; background: #ffffff; }
+    .component { min-height: 82px; padding: 15px; }
+    .component strong { display: block; margin-bottom: 10px; }
+    .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; text-transform: uppercase; }
+    .badge::before { width: 8px; height: 8px; border-radius: 50%; background: #85918e; content: ''; }
+    .badge-up { color: #16734e; }
+    .badge-up::before { background: #1ca66f; }
+    .badge-down { color: #b3473c; }
+    .badge-down::before { background: #d45b4c; }
+    .badge-disabled { color: #697572; }
+    .panel { padding: 18px; }
+    .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .updated { color: #697572; font-family: ui-monospace, monospace; font-size: 12px; }
+    .routes { display: grid; gap: 8px; }
+    .route { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 12px; border: 1px solid #e0e7e4; border-radius: 6px; }
+    .route-name { min-width: 0; overflow-wrap: anywhere; }
+    .route-name strong { display: block; }
+    .route-name span { color: #697572; font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }
+    .empty { margin: 0; color: #697572; }
+    @media (max-width: 520px) { body { padding: 16px; } header { align-items: flex-start; flex-direction: column; gap: 10px; } .route { align-items: flex-start; flex-direction: column; gap: 7px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="eyebrow">Runtime monitor</p><h1>Container status</h1></div>
+      <a class="back" href="/services/">Back to services</a>
+    </header>
+    <p class="summary" id="summary">Loading runtime status...</p>
+    <section class="grid" id="components" aria-label="Component status"></section>
+    <section class="panel" aria-labelledby="routes-title">
+      <div class="section-heading"><h2 id="routes-title">Service routes</h2><span class="updated" id="updated"></span></div>
+      <div class="routes" id="services"></div>
+    </section>
+  </main>
+  <script>
+    const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+    const stateLabel = (state) => state === 'up' ? 'online' : state === 'down' ? 'offline' : state;
+    const stateClass = (state) => state === 'up' ? 'badge-up' : state === 'down' ? 'badge-down' : 'badge-disabled';
+    const componentLabels = { ssh: 'SSH', code_server: 'code-server', nginx: 'Nginx', dockerd: 'Rootless DIND', tailscale: 'Tailscale' };
+
+    function render(data) {
+      const components = Object.entries(data.components || {});
+      document.getElementById('components').innerHTML = components.map(([key, state]) => `
+        <article class="component"><strong>${escapeHtml(componentLabels[key] || key)}</strong><span class="badge ${stateClass(state)}">${escapeHtml(stateLabel(state))}</span></article>
+      `).join('');
+      const usage = data.workspace_usage || 'unknown';
+      const mounts = Number.isFinite(Number(data.sshfs_mounts)) ? data.sshfs_mounts : 0;
+      document.getElementById('summary').textContent = `Workspace usage ${usage} · SSHFS mounts ${mounts}`;
+      document.getElementById('updated').textContent = data.generated_at ? `updated ${new Date(data.generated_at).toLocaleTimeString()}` : 'starting';
+      const services = data.services || [];
+      document.getElementById('services').innerHTML = services.length ? services.map((service) => `
+        <div class="route"><div class="route-name"><strong>${escapeHtml(service.name)}</strong><span>${escapeHtml(service.path)} · ${escapeHtml(service.endpoint)}</span></div><span class="badge ${stateClass(service.state)}">${escapeHtml(stateLabel(service.state))}</span></div>
+      `).join('') : '<p class="empty">No service routes configured.</p>';
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch(`/status.json?ts=${Date.now()}`, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        render(await response.json());
+      } catch (error) {
+        document.getElementById('summary').textContent = `Status unavailable: ${error.message}`;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
+EOF
+cat >"$status_file" <<'EOF'
+{"generated_at":null,"workspace_usage":"unknown","sshfs_mounts":0,"components":{},"services":[]}
+EOF
+chmod 0644 "$status_page" "$status_file"
 
 write_service_locations() {
     local protocol=$1
@@ -236,6 +343,24 @@ write_service_locations() {
             root ${runtime_dir};
             try_files ${portal_path}/index.html =404;
             default_type text/html;
+            add_header Cache-Control "no-store";
+        }
+
+        location = ${status_path} {
+            return 308 ${status_path}/;
+        }
+
+        location = ${status_path}/ {
+            root ${runtime_dir};
+            try_files ${status_path}/index.html =404;
+            default_type text/html;
+            add_header Cache-Control "no-store";
+        }
+
+        location = ${status_json_path} {
+            root ${runtime_dir};
+            try_files ${status_path}/status.json =404;
+            default_type application/json;
             add_header Cache-Control "no-store";
         }
 EOF
@@ -353,4 +478,4 @@ EOF
 
 /usr/sbin/nginx -t -q -c "$config_file" \
     || fail "Generated Nginx configuration is invalid."
-echo "[nginx-config] HTTPS entrypoint configured for ${server_names}; upstream=${upstream}."
+echo "[nginx-config] HTTPS entrypoint configured for ${server_names}; upstream=${upstream}; status=${status_path}/."

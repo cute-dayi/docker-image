@@ -5,7 +5,7 @@
 - `s6-overlay`：作为容器内的 init / supervisor，启动和守护服务
 - `OpenSSH Server`：使用公钥登录，并启用协议层 keepalive
 - `code-server`：在浏览器中使用 VS Code
-- `Nginx`：统一 Web 出口，默认将 HTTP 重定向到 HTTPS，反代 code-server，并提供动态内部服务跳转页
+- `Nginx`：统一 Web 出口，默认将 HTTP 重定向到 HTTPS，反代 code-server，并提供动态服务跳转页和运行状态页
 - `Tailscale`：可选的容器内 tailnet 接入服务
 - `cloudflared`：预装的 Cloudflare Tunnel 客户端，默认不启动
 - `Docker CLI`、Buildx、Compose plugin，以及可选的 rootless Docker-in-Docker daemon
@@ -38,6 +38,17 @@
 ```yaml
 environment:
   STARTUP_BANNER: "false"
+```
+
+### `dev` 运维命令
+
+镜像内置一个只读的统一运维入口，默认执行 `dev status`：
+
+```bash
+dev status      # 组件、路由、工作区和 SSHFS 状态
+dev routes      # 当前服务路由及上游状态
+dev mounts      # FUSE/SSHFS 挂载
+dev versions    # 主要工具版本
 ```
 
 ### SSHFS 远程目录
@@ -120,7 +131,7 @@ volumes:
 
 ## Nginx HTTPS 统一入口
 
-Nginx 默认启用，是容器 Web 服务的统一对外入口：容器内 code-server 默认只绑定 `127.0.0.1:8080`，HTTP `80` 会以 `308` 重定向到 HTTPS `443`。Nginx 会转发 WebSocket 和 `X-Forwarded-*` 头，因此可以直接用浏览器访问 code-server；`/services/` 则提供内部服务跳转页。
+Nginx 默认启用，是容器 Web 服务的统一对外入口：容器内 code-server 默认只绑定 `127.0.0.1:8080`，HTTP `80` 会以 `308` 重定向到 HTTPS `443`。Nginx 会转发 WebSocket 和 `X-Forwarded-*` 头，因此可以直接用浏览器访问 code-server；`/services/` 提供内部服务跳转页，`/status/` 提供自动刷新的运行状态页。
 
 SSH 仍独立使用 `22` 端口。正常部署只需映射 `22`、`80` 和 `443`，不要再映射 `8080`。
 
@@ -147,7 +158,11 @@ environment:
   NGINX_SERVICE_LINKS: "Jupyter|/jupyter|127.0.0.1:8888;Grafana|/grafana|127.0.0.1:3000"
 ```
 
-每项格式为 `名称|外部路径|内部host:port`，各项以分号分隔。名称只允许字母、数字、点、下划线和连字符；外部路径必须以 `/` 开头且不能有结尾 `/`。Nginx 会去掉外部路径前缀，例如 `/jupyter/tree` 会转发为 `http://127.0.0.1:8888/tree`，并补充 `X-Forwarded-Prefix`。如果上游服务生成绝对根路径链接，需要按该服务的方式设置它的 base URL。修改该变量后重启容器即可刷新页面和路由。
+每项格式为 `名称|外部路径|内部host:port`，各项以分号分隔。名称只允许字母、数字、点、下划线和连字符；外部路径必须以 `/` 开头且不能有结尾 `/`。`/services`、`/status` 和 `/status.json` 是镜像保留路径，不能作为自定义服务路径。Nginx 会去掉外部路径前缀，例如 `/jupyter/tree` 会转发为 `http://127.0.0.1:8888/tree`，并补充 `X-Forwarded-Prefix`。如果上游服务生成绝对根路径链接，需要按该服务的方式设置它的 base URL。修改该变量后重启容器即可刷新页面和路由。
+
+### 运行状态页
+
+访问 `https://<域名>/status/` 可以查看 SSH、Nginx、code-server、rootless DIND、Tailscale 的状态，以及工作区占用、SSHFS 挂载数量和各个服务上游的连通性。页面每 5 秒刷新一次；对应的机器可读接口是 `/status.json`。状态服务只写入这些运行指标，不会暴露密码、auth key 或其他环境变量。
 
 ### TLS 证书
 
@@ -386,6 +401,7 @@ docker exec -it docker-image tailscale \
 | `NGINX_SERVER_NAMES` | `_` | 逗号分隔的精确域名或通配域名，用于 Nginx `server_name` 和默认证书 SAN。 |
 | `NGINX_UPSTREAM` | `127.0.0.1:8080` | Nginx 根路径反代的 `host:port` 上游；更改 code-server 端口时一并更新。 |
 | `NGINX_SERVICE_LINKS` | 未设置 | 可选的动态内部服务列表，格式为 `名称|/路径|host:port;...`；生成 `/services/` 页面和对应反代路径。 |
+| `STATUS_INTERVAL` | `5` | 状态采样间隔，允许 `1`–`60` 秒。 |
 | `NGINX_TLS_CERT_FILE` | 未设置 | 自定义证书绝对路径；必须与 `NGINX_TLS_KEY_FILE` 一同设置。 |
 | `NGINX_TLS_KEY_FILE` | 未设置 | 自定义未加密私钥绝对路径；必须与 `NGINX_TLS_CERT_FILE` 一同设置。 |
 | `TS_ENABLE` | `false` | 设为严格的 `true` 才启用 Tailscale。 |
@@ -397,6 +413,7 @@ docker exec -it docker-image tailscale \
 | `TS_CONFIG_TIMEOUT` | `30` | 等待和配置 Tailscale 的秒数，允许 5–300。 |
 | `DOCKERD_ROOTLESS_ENABLE` | `false` | 严格设为 `true` 才启动镜像内的 rootless Docker daemon；需要外层容器使用 `--privileged`。 |
 | `DOCKER_HOST` | `unix:///run/user/1000/docker.sock` | 镜像内 Docker CLI 默认连接的 rootless daemon socket。 |
+| `STARTUP_BANNER` | `true` | 是否在容器初始化日志中显示启动横幅。 |
 | `TZ` | `Asia/Shanghai` | 容器时区。 |
 | `LANG` | `C.UTF-8` | 容器语言环境。 |
 
@@ -466,7 +483,8 @@ smoke test 会检查：
 - Docker CLI、Buildx、Compose plugin 和 rootless Docker 运行时依赖
 - SSH 配置语法和有效的 keepalive/认证设置
 - 默认自签名证书、域名 HTTPS 反代、HTTP 到 HTTPS 跳转，以及挂载自定义 TLS 证书
-- `/services/` 动态跳转页和内部服务前缀反代
+- `/services/` 动态跳转页、`/status/` 运行状态页和内部服务前缀反代
+- 状态采样服务、`dev` 运维命令和真实服务路由健康检查
 - `/init`、sshd、code-server 和 nginx 的实际运行状态
 - 只读 `authorized_keys` 挂载下的真实 SSH 公钥登录
 - Tailscale 默认关闭，以及启用但缺少 TUN 时不会影响主服务

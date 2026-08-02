@@ -1,0 +1,76 @@
+#!/bin/bash
+set -euo pipefail
+
+status_file=/run/nginx/status/status.json
+
+usage() {
+    cat <<'EOF'
+Usage: dev <command>
+
+Commands:
+  status    Show component, route, workspace, and SSHFS status (default)
+  routes    List configured service routes
+  mounts    List FUSE and SSHFS mounts
+  versions  Show the main bundled tool versions
+  help      Show this help
+EOF
+}
+
+status_json() {
+    if [ ! -s "$status_file" ] || ! jq -e . "$status_file" >/dev/null 2>&1; then
+        printf '%s\n' 'Runtime status is still starting.'
+        return 0
+    fi
+    jq -r '
+        "updated: " + (.generated_at // "starting"),
+        "workspace: " + (.workspace_usage // "unknown"),
+        "sshfs mounts: " + ((.sshfs_mounts // 0) | tostring),
+        "",
+        "components:",
+        (.components | to_entries[] | "  \(.key): \(.value)"),
+        "",
+        "routes:",
+        (.services[] | "  \(.state)\t\(.name)\t\(.path)\t\(.endpoint)")
+    ' "$status_file"
+}
+
+routes() {
+    if [ ! -s "$status_file" ] || ! jq -e . "$status_file" >/dev/null 2>&1; then
+        printf '%s\n' 'Runtime status is still starting.'
+        return 0
+    fi
+    jq -r '.services[] | "\(.state)\t\(.name)\t\(.path)\t\(.endpoint)"' "$status_file"
+}
+
+mounts() {
+    awk '$3 ~ /^fuse/ {print $2 "\t" $3}' /proc/mounts
+}
+
+versions() {
+    printf 'docker: '
+    docker --version | sed 's/^Docker version /v/'
+    printf 'node: '
+    node --version
+    printf 'npm: '
+    npm --version
+    printf 'code-server: '
+    code-server --version | head -n 1
+    printf 'sshfs: '
+    sshfs --version 2>&1 | sed -n '1p'
+    printf 'nginx: '
+    nginx -v 2>&1 | sed 's|^nginx/|v|'
+}
+
+command_name="${1:-status}"
+case "$command_name" in
+    status) status_json ;;
+    routes) routes ;;
+    mounts) mounts ;;
+    versions) versions ;;
+    help|-h|--help) usage ;;
+    *)
+        printf 'Unknown dev command: %s\n\n' "$command_name" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

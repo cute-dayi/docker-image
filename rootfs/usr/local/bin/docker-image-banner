@@ -46,8 +46,10 @@ https_port="${NGINX_HTTPS_PORT:-443}"
 nginx_status="$(feature_status "${NGINX_ENABLE:-true}")"
 if [ "$nginx_status" = 'on' ]; then
     web_entry="https://${display_host}:${https_port}/services/"
+    status_entry="https://${display_host}:${https_port}/status/"
 else
     web_entry='disabled (set NGINX_ENABLE=true to enable)'
+    status_entry='disabled'
 fi
 
 service_count=0
@@ -61,6 +63,7 @@ printf '%b\n' "${accent}|${reset}  ${bold}DOCKER IMAGE${reset}  ${muted}:: REMOT
 printf '%b\n' "${accent}|${reset}  ${muted}boot sequence initialized${reset}"
 row "SSH       ssh://root@${display_host}:22"
 row "WEB       ${web_entry}"
+row "STATUS    ${status_entry}"
 row "WORKSPACE /workspace"
 row "SERVICES  ${service_count} custom route(s)  |  SSHFS ready"
 row "DIND      $(feature_status "${DOCKERD_ROOTLESS_ENABLE:-false}")  |  TAILSCALE $(feature_status "${TS_ENABLE:-false}")"

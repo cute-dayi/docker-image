@@ -1,0 +1,120 @@
+#!/bin/bash
+set -euo pipefail
+
+status_dir=/run/nginx/status
+status_file="${status_dir}/status.json"
+interval="${STATUS_INTERVAL:-5}"
+if ! [[ "$interval" =~ ^[0-9]+$ ]] || ((interval < 1 || interval > 60)); then
+    interval=5
+fi
+
+process_state() {
+    pgrep -x "$1" >/dev/null 2>&1 && printf 'up' || printf 'down'
+}
+
+endpoint_state() {
+    local endpoint=$1
+    if [[ ! "$endpoint" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}$ ]]; then
+        printf 'down'
+        return
+    fi
+    if curl --noproxy '*' -sS -o /dev/null \
+        --connect-timeout 1 --max-time 2 "http://${endpoint}/" >/dev/null 2>&1; then
+        printf 'up'
+    else
+        printf 'down'
+    fi
+}
+
+upstream="${NGINX_UPSTREAM:-127.0.0.1:8080}"
+service_links="${NGINX_SERVICE_LINKS:-}"
+
+build_services_json() {
+    local services_json
+    local service
+    local service_name
+    local service_path
+    local service_endpoint
+    local service_state
+    local extra
+
+    services_json="$(jq -cn \
+        --arg name 'code-server' \
+        --arg path '/' \
+        --arg endpoint "$upstream" \
+        --arg state "$(endpoint_state "$upstream")" \
+        '[{name: $name, path: $path, endpoint: $endpoint, state: $state}]')"
+    if [ -n "$service_links" ]; then
+        IFS=';' read -r -a services <<<"$service_links"
+        for service in "${services[@]}"; do
+            IFS='|' read -r service_name service_path service_endpoint extra <<<"$service"
+            [ -n "${service_name:-}" ] && [ -n "${service_path:-}" ] \
+                && [ -n "${service_endpoint:-}" ] && [ -z "${extra:-}" ] || continue
+            service_state="$(endpoint_state "$service_endpoint")"
+            services_json="$(jq -cn \
+                --argjson services "$services_json" \
+                --arg name "$service_name" \
+                --arg path "$service_path" \
+                --arg endpoint "$service_endpoint" \
+                --arg state "$service_state" \
+                '$services + [{name: $name, path: $path, endpoint: $endpoint, state: $state}]')"
+        done
+    fi
+    printf '%s\n' "$services_json"
+}
+
+write_status() {
+    local payload
+    local tmp_file
+    local workspace_usage
+    local sshfs_mounts
+    local nginx_state
+    local dockerd_state
+    local tailscale_state
+    local services_json
+
+    workspace_usage="$(df -P /workspace 2>/dev/null | awk 'NR == 2 {print $5}')"
+    [ -n "$workspace_usage" ] || workspace_usage=unknown
+    sshfs_mounts="$(awk '$3 == "fuse.sshfs" {count++} END {print count + 0}' /proc/mounts 2>/dev/null)"
+    [ -n "$sshfs_mounts" ] || sshfs_mounts=0
+    nginx_state=disabled
+    if [ "${NGINX_ENABLE:-true}" = true ]; then
+        nginx_state="$(process_state nginx)"
+    fi
+    dockerd_state=disabled
+    if [ "${DOCKERD_ROOTLESS_ENABLE:-false}" = true ]; then
+        dockerd_state="$(process_state dockerd)"
+    fi
+    tailscale_state=disabled
+    if [ "${TS_ENABLE:-false}" = true ]; then
+        tailscale_state="$(process_state tailscaled)"
+    fi
+    services_json="$(build_services_json)"
+
+    payload="$(jq -cn \
+        --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg workspace_usage "$workspace_usage" \
+        --argjson sshfs_mounts "$sshfs_mounts" \
+        --arg ssh "$(process_state sshd)" \
+        --arg code_server "$(process_state code-server)" \
+        --arg nginx "$nginx_state" \
+        --arg dockerd "$dockerd_state" \
+        --arg tailscale "$tailscale_state" \
+        --argjson services "$services_json" \
+        '{generated_at: $generated_at, workspace_usage: $workspace_usage, sshfs_mounts: $sshfs_mounts, components: {ssh: $ssh, code_server: $code_server, nginx: $nginx, dockerd: $dockerd, tailscale: $tailscale}, services: $services}')"
+    install -d -m 0755 "$status_dir"
+    tmp_file="$(mktemp "${status_file}.XXXXXX")"
+    printf '%s\n' "$payload" >"$tmp_file"
+    chmod 0644 "$tmp_file"
+    mv -f "$tmp_file" "$status_file"
+}
+
+write_status
+if [ "${STATUS_ONCE:-false}" = true ]; then
+    exit 0
+fi
+
+while :; do
+    sleep "$interval"
+    write_status
+done

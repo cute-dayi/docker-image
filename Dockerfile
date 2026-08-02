@@ -28,7 +28,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TS_CONFIG_TIMEOUT=30 \
     DOCKERD_ROOTLESS_ENABLE=false \
     DOCKER_HOST=unix:///run/user/1000/docker.sock \
-    STARTUP_BANNER=true
+    STARTUP_BANNER=true \
+    STATUS_INTERVAL=5
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -141,7 +142,10 @@ RUN set -eux; \
       /etc/s6-overlay/scripts/init-root \
       /etc/s6-overlay/scripts/configure-nginx \
       /etc/s6-overlay/scripts/configure-tailscale \
+      /etc/s6-overlay/s6-rc.d/runtime-status/run \
       /usr/local/bin/docker-image-banner \
+      /usr/local/bin/dev \
+      /usr/local/bin/update-status \
       /etc/s6-overlay/s6-rc.d/sshd/run \
       /etc/s6-overlay/s6-rc.d/code-server/run \
       /etc/s6-overlay/s6-rc.d/dockerd-rootless/run \
