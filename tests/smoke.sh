@@ -48,6 +48,7 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
         /etc/s6-overlay/s6-rc.d/code-server/run \
         /etc/s6-overlay/s6-rc.d/dockerd-rootless/run \
         /etc/s6-overlay/s6-rc.d/nginx/run \
+        /etc/s6-overlay/s6-rc.d/resolver-web/run \
         /etc/s6-overlay/s6-rc.d/tailscaled/run
     node --check /usr/local/bin/resolver-web.js
     resolv_test_file="$(mktemp)"
@@ -68,15 +69,28 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     grep -q "^nameserver 127.0.0.1$" "$resolv_test_file"
     grep -q "^nameserver 1.1.1.1$" "$resolv_test_file"
     [ "$(grep -c "^nameserver 9.9.9.9$" "$resolv_test_file")" = 1 ]
+    [ "$(stat -c "%a" "$resolv_test_file")" = 644 ]
     rm -rf "$resolv_test_dir"
     banner="$(NGINX_SERVER_NAMES=code.example.test \
         NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
+        RESOLV_WEB_PASSWORD=smoke-secret \
         /usr/local/bin/docker-image-banner)"
     printf '%s\n' "$banner" | grep -Fq 'DOCKER IMAGE'
     printf '%s\n' "$banner" | grep -Fq 'https://code.example.test:443/services/'
     printf '%s\n' "$banner" | grep -Fq 'https://code.example.test:443/dns/'
+    /usr/local/bin/docker-image-banner | grep -Fq 'DNS       disabled'
     [ -z "$(STARTUP_BANNER=false /usr/local/bin/docker-image-banner)" ]
     /usr/local/bin/dev help | grep -Fq 'status'
+    NGINX_SERVER_NAMES=code.example.test \
+        NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
+        /etc/s6-overlay/scripts/configure-nginx
+    ! grep -Fq "location = /dns/" /run/nginx/nginx.conf
+    ! grep -Fq "location ^~ /dns/api/" /run/nginx/nginx.conf
+    NGINX_SERVER_NAMES=code.example.test \
+        RESOLV_WEB_ALLOW_UNAUTHENTICATED=true \
+        /etc/s6-overlay/scripts/configure-nginx
+    grep -Fq "location = /dns/" /run/nginx/nginx.conf
+    ! grep -Fq "auth_basic_user_file" /run/nginx/nginx.conf
     NGINX_SERVER_NAMES=code.example.test \
         NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
         RESOLV_WEB_PASSWORD=smoke-secret \
@@ -103,6 +117,51 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     jq -e ".services | length == 2" \
         /run/nginx/status/status.json >/dev/null
     /usr/local/bin/dev routes | grep -Fq 'Echo'
+
+    tunnel_test_dir="$(mktemp -d)"
+    printf "%s\n" \
+        "#!/bin/bash" \
+        "trap \"exit 0\" TERM INT" \
+        "printf \"https://smoke-test.trycloudflare.com\\n\" >&2" \
+        "while :; do sleep 1; done" \
+        >"$tunnel_test_dir/cloudflared"
+    chmod 755 "$tunnel_test_dir/cloudflared"
+    CLOUDFLARED_BIN="$tunnel_test_dir/cloudflared" \
+        RESOLV_WEB_PORT=18787 \
+        RESOLV_STATE_FILE="$tunnel_test_dir/resolver.json" \
+        node /usr/local/bin/resolver-web.js >"$tunnel_test_dir/first.log" 2>&1 &
+    resolver_pid=$!
+    for _ in $(seq 1 30); do
+        curl -fsS http://127.0.0.1:18787/api/tunnel >/dev/null 2>&1 && break
+        sleep 0.1
+    done
+    tunnel_result="$(curl -fsS -X POST \
+        -H "Content-Type: application/json" \
+        --data "{\"target\":\"127.0.0.1:8080\"}" \
+        http://127.0.0.1:18787/api/tunnel/start)"
+    tunnel_pid="$(printf "%s\n" "$tunnel_result" | jq -r .pid)"
+    kill -0 "$tunnel_pid"
+    kill -KILL "$resolver_pid"
+    wait "$resolver_pid" 2>/dev/null || true
+    kill -0 "$tunnel_pid"
+    CLOUDFLARED_BIN="$tunnel_test_dir/cloudflared" \
+        RESOLV_WEB_PORT=18787 \
+        RESOLV_STATE_FILE="$tunnel_test_dir/resolver.json" \
+        node /usr/local/bin/resolver-web.js >"$tunnel_test_dir/second.log" 2>&1 &
+    resolver_pid=$!
+    for _ in $(seq 1 60); do
+        if curl -fsS http://127.0.0.1:18787/api/tunnel \
+            | jq -e ".running == false" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.1
+    done
+    curl -fsS http://127.0.0.1:18787/api/tunnel | jq -e ".running == false" >/dev/null
+    ! kill -0 "$tunnel_pid" 2>/dev/null
+    kill -TERM "$resolver_pid"
+    wait "$resolver_pid"
+    rm -rf "$tunnel_test_dir"
+
     NGINX_HTTP_PORT=8081 NGINX_HTTPS_PORT=8443 \
         /etc/s6-overlay/scripts/configure-nginx
     nginx -t -q -c /run/nginx/nginx.conf
@@ -158,6 +217,7 @@ docker run -d \
     -e CODE_SERVER_AUTH=none \
     -e NGINX_SERVER_NAMES=smoke.example.test \
     -e NGINX_SERVICE_LINKS='Echo|/echo|127.0.0.1:8080' \
+    -e RESOLV_WEB_PASSWORD=smoke-secret \
     -e TS_ENABLE=false \
     -p 127.0.0.1::22 \
     -p 127.0.0.1::80 \
@@ -220,27 +280,37 @@ status_json="$(curl --noproxy '*' -fkS \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/status.json")"
 printf '%s\n' "$status_json" | jq -e '.services | map(select(.name == "Echo")) | length == 1' >/dev/null
+printf '%s\n' "$status_json" | jq -e '.components.code_server == "up"' >/dev/null
+dns_unauthenticated_status="$(curl --noproxy '*' -skS -o /dev/null -w '%{http_code}' \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/dns/api/resolver")"
+[ "$dns_unauthenticated_status" = 401 ]
 dns_page="$(curl --noproxy '*' -fkS \
+    -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/dns/")"
 printf '%s\n' "$dns_page" | grep -Fq 'id="resolver-form"'
 printf '%s\n' "$dns_page" | grep -Fq 'https://try.cloudflare.com/'
 printf '%s\n' "$dns_page" | grep -Fq 'id="tunnel-start"'
 dns_json="$(curl --noproxy '*' -fkS \
+    -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/dns/api/resolver")"
 printf '%s\n' "$dns_json" | jq -e '.config.local_nameserver == "127.0.0.1"' >/dev/null
 tunnel_json="$(curl --noproxy '*' -fkS \
+    -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/dns/api/tunnel")"
 printf '%s\n' "$tunnel_json" | jq -e '.running == false and .default_target == "http://127.0.0.1:8080"' >/dev/null
 tunnel_invalid="$(curl --noproxy '*' -skS -X POST \
+    -u admin:smoke-secret \
     -H 'Content-Type: application/json' \
     --data '{"target":"file:///etc/passwd"}' \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/dns/api/tunnel/start")"
 printf '%s\n' "$tunnel_invalid" | jq -e '.error | contains("HTTP(S)")' >/dev/null
 dns_apply="$(curl --noproxy '*' -fkS -X POST \
+    -u admin:smoke-secret \
     -H 'Content-Type: application/json' \
     --data '{"auto_config":false,"local_nameserver":"127.0.0.1","fallback_nameserver":"1.1.1.1","fallback_always":false,"check_domain":"example.com"}' \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \

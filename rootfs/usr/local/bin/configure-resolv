@@ -146,6 +146,13 @@ if ! {
     exit 0
 fi
 
+if ! chmod --reference="$resolv_file" "$tmp_file" 2>/dev/null \
+    || ! chown --reference="$resolv_file" "$tmp_file" 2>/dev/null; then
+    rm -f "$tmp_file"
+    echo "[resolv-config] Could not preserve ${resolv_file} ownership or mode; keeping the existing setup." >&2
+    exit 0
+fi
+
 if mv -f "$tmp_file" "$resolv_file" 2>/dev/null; then
     printf '[resolv-config] Added nameserver%s: %s\n' \
         "$([ "${#additions[@]}" -gt 1 ] && printf 's' || true)" \

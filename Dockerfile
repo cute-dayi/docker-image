@@ -30,6 +30,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DOCKER_HOST=unix:///run/user/1000/docker.sock \
     STARTUP_BANNER=true \
     RESOLV_WEB_ENABLE=true \
+    RESOLV_WEB_ALLOW_UNAUTHENTICATED=false \
     RESOLV_WEB_PORT=8787 \
     STATUS_INTERVAL=5
 

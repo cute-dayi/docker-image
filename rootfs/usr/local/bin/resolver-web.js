@@ -12,6 +12,7 @@ const stateFile = process.env.RESOLV_STATE_FILE || '/root/.config/docker-image/r
 const port = Number.parseInt(process.env.RESOLV_WEB_PORT || '8787', 10);
 const cloudflaredBin = process.env.CLOUDFLARED_BIN || 'cloudflared';
 const tunnelRuntimeDir = '/run/cloudflared';
+const tunnelPidFile = path.join(tunnelRuntimeDir, 'quick-tunnel.pid');
 const tunnelDefaultTarget = process.env.NGINX_UPSTREAM || '127.0.0.1:8080';
 const defaults = {
   auto_config: true,
@@ -222,6 +223,102 @@ let tunnelState = {
   output_tail: '',
 };
 
+function readTunnelPid() {
+  try {
+    const value = Number.parseInt(fs.readFileSync(tunnelPidFile, 'utf8').trim(), 10);
+    return Number.isInteger(value) && value > 1 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeTunnelPid(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) throw new Error('cloudflared did not return a valid process ID');
+  fs.mkdirSync(tunnelRuntimeDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(tunnelRuntimeDir, 0o700);
+  const temporary = `${tunnelPidFile}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temporary, `${pid}\n`, { mode: 0o600 });
+    fs.renameSync(temporary, tunnelPidFile);
+  } catch (error) {
+    try { fs.unlinkSync(temporary); } catch {}
+    throw error;
+  }
+}
+
+function clearTunnelPid(expectedPid) {
+  if (expectedPid && readTunnelPid() !== expectedPid) return;
+  try { fs.unlinkSync(tunnelPidFile); } catch (error) {
+    if (error.code !== 'ENOENT') console.warn(`[resolver-web] Could not remove tunnel PID file: ${error.message}`);
+  }
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+function isManagedTunnel(pid) {
+  try {
+    const args = fs.readFileSync(`/proc/${pid}/cmdline`)
+      .toString('utf8')
+      .split('\0')
+      .filter(Boolean);
+    const executableMatches = path.basename(args[0]) === path.basename(cloudflaredBin)
+      || (args.length > 1 && path.basename(args[1]) === path.basename(cloudflaredBin));
+    return executableMatches
+      && args.includes('tunnel')
+      && args.includes('--no-autoupdate')
+      && args.includes('--url');
+  } catch {
+    return false;
+  }
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForProcessExit(pid, attempts = 40) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (!processExists(pid)) return true;
+    await delay(50);
+  }
+  return !processExists(pid);
+}
+
+async function terminateManagedTunnel(pid) {
+  if (!processExists(pid)) {
+    clearTunnelPid(pid);
+    return;
+  }
+  if (!isManagedTunnel(pid)) {
+    console.warn(`[resolver-web] Ignoring stale tunnel PID ${pid}: command does not match managed cloudflared.`);
+    clearTunnelPid(pid);
+    return;
+  }
+  try { process.kill(pid, 'SIGTERM'); } catch {}
+  if (!await waitForProcessExit(pid)) {
+    try { process.kill(pid, 'SIGKILL'); } catch {}
+    await waitForProcessExit(pid, 20);
+  }
+  clearTunnelPid(pid);
+}
+
+async function cleanupStaleTunnel() {
+  const pid = readTunnelPid();
+  if (!pid) {
+    clearTunnelPid();
+    return;
+  }
+  console.warn(`[resolver-web] Cleaning up stale cloudflared process ${pid}.`);
+  await terminateManagedTunnel(pid);
+}
+
 function defaultTunnelTarget() {
   try {
     return normalizeTunnelTarget(tunnelDefaultTarget);
@@ -284,6 +381,16 @@ async function startTunnel(targetInput) {
   tunnelProcess = child;
   child.stdout.on('data', tunnelOutput);
   child.stderr.on('data', tunnelOutput);
+  if (Number.isInteger(child.pid)) {
+    try {
+      writeTunnelPid(child.pid);
+    } catch (error) {
+      tunnelState.last_error = `could not record cloudflared process: ${error.message}`;
+      child.kill('SIGTERM');
+      tunnelProcess = null;
+      throw new Error(tunnelState.last_error);
+    }
+  }
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -307,10 +414,12 @@ async function startTunnel(targetInput) {
     child.once('error', (error) => {
       tunnelState.last_error = error.message;
       if (tunnelProcess === child) tunnelProcess = null;
+      clearTunnelPid(child.pid);
       finish(error);
     });
     child.once('exit', (code, signal) => {
       if (tunnelProcess === child) tunnelProcess = null;
+      clearTunnelPid(child.pid);
       if (!tunnelState.url) {
         tunnelState.last_error = `cloudflared exited before creating a tunnel (${signal || `code ${code}`})`;
         finish(new Error(tunnelState.last_error));
@@ -337,6 +446,7 @@ async function stopTunnel() {
     });
   });
   if (tunnelProcess === child) tunnelProcess = null;
+  clearTunnelPid(child.pid);
   tunnelState.url = null;
   tunnelState.last_error = null;
   tunnelState.output_tail = '';
@@ -440,9 +550,6 @@ const server = http.createServer((request, response) => {
     writeJson(response, 500, { error: error.message || 'internal error' });
   });
 });
-server.listen(port, '127.0.0.1', () => {
-  console.log(`[resolver-web] Listening on 127.0.0.1:${port}; state=${stateFile}`);
-});
 let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
@@ -452,3 +559,15 @@ async function shutdown() {
 }
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+
+async function startServer() {
+  await cleanupStaleTunnel();
+  server.listen(port, '127.0.0.1', () => {
+    console.log(`[resolver-web] Listening on 127.0.0.1:${port}; state=${stateFile}`);
+  });
+}
+
+startServer().catch((error) => {
+  console.error(`[resolver-web] Could not start: ${error.message}`);
+  process.exit(1);
+});

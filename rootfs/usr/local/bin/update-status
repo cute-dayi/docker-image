@@ -12,6 +12,10 @@ process_state() {
     pgrep -x "$1" >/dev/null 2>&1 && printf 'up' || printf 'down'
 }
 
+process_state_pattern() {
+    pgrep -f "$1" >/dev/null 2>&1 && printf 'up' || printf 'down'
+}
+
 endpoint_state() {
     local endpoint=$1
     if [[ ! "$endpoint" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}$ ]]; then
@@ -96,7 +100,7 @@ write_status() {
         --arg workspace_usage "$workspace_usage" \
         --argjson sshfs_mounts "$sshfs_mounts" \
         --arg ssh "$(process_state sshd)" \
-        --arg code_server "$(process_state code-server)" \
+        --arg code_server "$(process_state_pattern '/usr/lib/code-server(/lib/node)?([[:space:]]|$)')" \
         --arg nginx "$nginx_state" \
         --arg dockerd "$dockerd_state" \
         --arg tailscale "$tailscale_state" \

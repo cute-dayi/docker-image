@@ -238,7 +238,7 @@
       } else {
         source.textContent = payload.stored ? '当前配置来自 /root 持久化文件，可以在此测试和修改。' : '当前使用默认配置，可以在此测试和保存。';
       }
-      meta.textContent = payload.password_protected ? `此页面使用 Basic Auth 保护；持久化位置：${statePath}` : '未检测到 PASSWORD 或 RESOLV_WEB_PASSWORD，请勿将此页面直接暴露到公网。';
+      meta.textContent = payload.password_protected ? `此页面使用 Basic Auth 保护；持久化位置：${statePath}` : '当前显式启用了无认证模式，请勿将此页面直接暴露到公网。';
     }).catch((error) => { source.textContent = error.message; source.className = 'source warning'; });
     refreshTunnel();
   </script>

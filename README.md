@@ -90,20 +90,27 @@ fusermount3 -u /workspace/remote
 
 页面下方的“临时 Cloudflare Tunnel”可以填写 `127.0.0.1:8080`、`http://127.0.0.1:8080` 或其他容器内 HTTP(S) 服务地址，点击“新建临时隧道”后等待随机的 `https://*.trycloudflare.com` 链接，再用“停止隧道”回收进程。它调用 Quick Tunnel（等价于 `cloudflared tunnel --no-autoupdate --url ...`），不需要 Cloudflare 账号或 API token；进程、URL 和日志只保存在 `/run` 内存文件系统中，不会写入 `/root`。Cloudflare 将 Quick Tunnel 定位为开发测试功能，并有并发请求数和 SSE 等限制，生产环境应使用正式的命名 Tunnel。
 
-管理页优先使用 `RESOLV_WEB_PASSWORD` 生成 Nginx Basic Auth；未设置时使用已有的 `PASSWORD`。如果两者都没有，页面不会启用认证，不应直接暴露到公网。
+管理页优先使用 `RESOLV_WEB_PASSWORD` 生成 Nginx Basic Auth；未设置时使用已有的 `PASSWORD`。如果两者都没有，页面和 API 默认完全关闭。只在受信任网络内临时测试时，才应显式设置 `RESOLV_WEB_ALLOW_UNAUTHENTICATED=true` 跳过认证。
 
 ```yaml
 services:
+  mihomo-px-2-898989:
+    ports:
+      - "49184:443"
+
   ovo:
     image: ghcr.io/rabbit-dayi/docker-image:latest
     network_mode: "container:mihomo-px-2-898989"
     environment:
+      RESOLV_WEB_PASSWORD: change-this-password
       RESOLV_AUTO_CONFIG: "true"
       RESOLV_LOCAL_NAMESERVER: 127.0.0.1
       RESOLV_FALLBACK_NAMESERVER: 1.1.1.1
       # 没有本地 Mihomo DNS 时，也尝试使用 1.1.1.1
       # RESOLV_FALLBACK_ALWAYS: "true"
 ```
+
+共享网络模式下，端口必须映射在拥有网络命名空间的 Mihomo 服务上。镜像中的 code-server 默认只监听回环地址，因此原来的 `49184:8080` 无法从宿主机访问；请映射 `49184:443`，然后使用 `https://<宿主机>:49184/`。
 
 ## 镜像地址
 
@@ -428,9 +435,10 @@ docker exec -it docker-image tailscale \
 | `NGINX_UPSTREAM` | `127.0.0.1:8080` | Nginx 根路径反代的 `host:port` 上游；更改 code-server 端口时一并更新。 |
 | `NGINX_SERVICE_LINKS` | 未设置 | 可选的动态内部服务列表，格式为 `名称|/路径|host:port;...`；生成 `/services/` 页面和对应反代路径。 |
 | `STATUS_INTERVAL` | `5` | 状态采样间隔，允许 `1`–`60` 秒。 |
-| `RESOLV_WEB_ENABLE` | `true` | 是否启用 `/dns/` DNS 管理页和本地 API。 |
+| `RESOLV_WEB_ENABLE` | `true` | 是否允许启用 `/dns/` DNS 管理页和本地 API；仍需配置密码或显式允许无认证。 |
 | `RESOLV_WEB_PORT` | `8787` | DNS 管理 API 仅监听容器内 `127.0.0.1` 的端口。 |
 | `RESOLV_WEB_PASSWORD` | 未设置 | DNS 管理页的 Basic Auth 密码；未设置时回退使用 `PASSWORD`。 |
+| `RESOLV_WEB_ALLOW_UNAUTHENTICATED` | `false` | 没有管理页密码时是否仍启用页面和 API；仅适合受信任网络内临时测试。 |
 | `RESOLV_STATE_FILE` | `/root/.config/docker-image/resolver.json` | DNS 页面保存的持久化配置文件；临时 Cloudflare Tunnel 不使用此文件。 |
 | `RESOLV_AUTO_CONFIG` | `true` | 是否在启动时探测并补充 DNS；设为 `false` 可完全禁用。 |
 | `RESOLV_LOCAL_NAMESERVER` | `127.0.0.1` | Mihomo 本地 DNS 的 IPv4 地址，探测端口固定为 `53`。 |

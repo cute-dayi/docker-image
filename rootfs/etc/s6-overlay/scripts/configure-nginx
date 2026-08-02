@@ -73,6 +73,18 @@ case "$dns_web_enabled" in
     true|false) ;;
     *) fail "RESOLV_WEB_ENABLE must be true or false." ;;
 esac
+dns_allow_unauthenticated="${RESOLV_WEB_ALLOW_UNAUTHENTICATED:-false}"
+case "$dns_allow_unauthenticated" in
+    true|false) ;;
+    *) fail "RESOLV_WEB_ALLOW_UNAUTHENTICATED must be true or false." ;;
+esac
+dns_password="${RESOLV_WEB_PASSWORD:-${PASSWORD:-}}"
+if [ "$dns_web_enabled" = true ] \
+    && [ -z "$dns_password" ] \
+    && [ "$dns_allow_unauthenticated" != true ]; then
+    echo "[nginx-config] DNS management disabled because no password is configured."
+    dns_web_enabled=false
+fi
 dns_port="${RESOLV_WEB_PORT:-8787}"
 validate_port "$dns_port" || fail "RESOLV_WEB_PORT must be between 1 and 65535."
 dns_port=$((10#$dns_port))
@@ -203,7 +215,6 @@ install -d -m 0755 "$status_dir"
 if [ "$dns_web_enabled" = true ]; then
     install -d -m 0755 "$dns_dir"
     install -m 0644 /usr/local/share/docker-image/resolver.html "$dns_page"
-    dns_password="${RESOLV_WEB_PASSWORD:-${PASSWORD:-}}"
     if [ -n "$dns_password" ]; then
         dns_password_hash="$(openssl passwd -apr1 "$dns_password")" \
             || fail "Could not generate the DNS page password file."

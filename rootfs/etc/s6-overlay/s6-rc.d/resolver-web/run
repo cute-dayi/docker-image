@@ -6,4 +6,18 @@ if [ "${RESOLV_WEB_ENABLE:-true}" != "true" ]; then
     exec sleep infinity
 fi
 
+case "${RESOLV_WEB_ALLOW_UNAUTHENTICATED:-false}" in
+    true|false) ;;
+    *)
+        echo "[resolver-web] RESOLV_WEB_ALLOW_UNAUTHENTICATED must be true or false; service disabled." >&2
+        exec sleep infinity
+        ;;
+esac
+
+if [ -z "${RESOLV_WEB_PASSWORD:-${PASSWORD:-}}" ] \
+    && [ "${RESOLV_WEB_ALLOW_UNAUTHENTICATED:-false}" != true ]; then
+    echo "[resolver-web] Disabled because no password is configured."
+    exec sleep infinity
+fi
+
 exec node /usr/local/bin/resolver-web.js
