@@ -25,7 +25,8 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     command -v /init sshd code-server uv tailscale tailscaled nginx openssl \
         docker dockerd dockerd-rootless.sh newuidmap newgidmap \
         slirp4netns fuse-overlayfs ldd \
-        htop jq lsof ncdu tree dig mtr tcpdump rsync socat pstree strace >/dev/null
+        htop jq lsof ncdu tree dig mtr tcpdump rsync socat pstree strace \
+        node npm npx >/dev/null
     test -x /usr/bin/true
     command -v docker-rootlesskit >/dev/null || command -v rootlesskit >/dev/null
     getent passwd dockerd | grep -q "^dockerd:x:1000:1000:"
