@@ -219,33 +219,44 @@ if [ -c /dev/net/tun ]; then
     docker exec "$container" pgrep -f code-server >/dev/null
 fi
 
-# Rootless Docker needs the outer container's relaxed security profile. Verify
-# that the daemon runs as the dedicated user and can build and start an inner
-# container without depending on an external image registry.
-docker rm -f "$container" >/dev/null
-docker run -d \
-    --name "$container" \
-    --privileged \
-    -e GITHUB_USER= \
-    -e CODE_SERVER_AUTH=none \
-    -e DOCKERD_ROOTLESS_ENABLE=true \
-    "$image" >/dev/null
-rootless_ready=0
-for _ in {1..60}; do
-    if docker exec "$container" docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless; then
-        rootless_ready=1
-        break
-    fi
-    sleep 1
-done
-if [ "$rootless_ready" -ne 1 ]; then
-    docker logs "$container" >&2
-    exit 1
+# Rootless Docker needs the outer container's relaxed security profile and a
+# runner that exposes FUSE plus unprivileged user namespaces. Keep the rest of
+# the smoke test useful on hosted runners that intentionally restrict either.
+rootless_capable=1
+if ! docker run --rm --privileged --entrypoint /bin/bash "$image" -c '
+    set -e
+    test -c /dev/fuse
+    /command/s6-setuidgid dockerd /usr/bin/unshare --user --map-root-user true >/dev/null 2>&1
+'; then
+    rootless_capable=0
+    echo "Skipping rootless Docker integration: runner lacks /dev/fuse or unprivileged user namespaces." >&2
 fi
-docker exec "$container" test -S /run/user/1000/docker.sock
-docker exec "$container" docker info --format '{{json .SecurityOptions}}' | grep -q rootless
-docker exec "$container" bash -c 'test "$(ps -C dockerd -o user= | tr -d " ")" = dockerd'
-docker exec -i "$container" /bin/bash -se <<'INNER_DOCKER_SMOKE'
+
+if [ "$rootless_capable" -eq 1 ]; then
+    docker rm -f "$container" >/dev/null
+    docker run -d \
+        --name "$container" \
+        --privileged \
+        -e GITHUB_USER= \
+        -e CODE_SERVER_AUTH=none \
+        -e DOCKERD_ROOTLESS_ENABLE=true \
+        "$image" >/dev/null
+    rootless_ready=0
+    for _ in {1..60}; do
+        if docker exec "$container" docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless; then
+            rootless_ready=1
+            break
+        fi
+        sleep 1
+    done
+    if [ "$rootless_ready" -ne 1 ]; then
+        docker logs "$container" >&2
+        exit 1
+    fi
+    docker exec "$container" test -S /run/user/1000/docker.sock
+    docker exec "$container" docker info --format '{{json .SecurityOptions}}' | grep -q rootless
+    docker exec "$container" bash -c 'test "$(ps -C dockerd -o user= | tr -d " ")" = dockerd'
+    docker exec -i "$container" /bin/bash -se <<'INNER_DOCKER_SMOKE'
 set -o pipefail
 context="$(mktemp -d)"
 trap 'rm -rf "$context"' EXIT
@@ -263,7 +274,8 @@ ENTRYPOINT ["/usr/bin/true"]
 DOCKERFILE
 docker run --rm rootless-dind-smoke
 INNER_DOCKER_SMOKE
-docker exec "$container" pgrep -x sshd >/dev/null
-docker exec "$container" pgrep -f code-server >/dev/null
+    docker exec "$container" pgrep -x sshd >/dev/null
+    docker exec "$container" pgrep -f code-server >/dev/null
+fi
 
 echo "Smoke tests passed for $image"

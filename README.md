@@ -433,7 +433,7 @@ smoke test 会检查：
 - 只读 `authorized_keys` 挂载下的真实 SSH 公钥登录
 - Tailscale 默认关闭，以及启用但缺少 TUN 时不会影响主服务
 - runner 提供 `/dev/net/tun` 时，Tailscale daemon、LocalAPI socket 和主服务的实际运行状态
-- 以 `--privileged` 运行时，rootless `dockerd` 的 socket、非 root daemon 身份，以及本地 scratch 镜像的构建和运行
+- 在 runner 提供 `/dev/fuse` 和非特权 user namespace 时，以 `--privileged` 运行并检查 rootless `dockerd` 的 socket、非 root daemon 身份，以及本地 scratch 镜像的构建和运行；能力受限的 runner 会明确跳过这部分集成检查
 
 ## GitHub Actions
 
