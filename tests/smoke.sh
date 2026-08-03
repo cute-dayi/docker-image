@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
+trap 'rc=$?; printf "Smoke test failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 
 image="${1:?usage: tests/smoke.sh IMAGE}"
 container="docker-image-smoke-${RANDOM}"
@@ -22,6 +24,7 @@ assert_config() {
 
 docker run --rm -i --entrypoint /bin/bash "$image" -se <<'IMAGE_SMOKE'
     set -e
+    trap 'rc=$?; printf "Image smoke failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2; exit "$rc"' ERR
     command -v /init sshd code-server uv tailscale tailscaled cloudflared nginx openssl \
         /usr/local/bin/docker-image-banner \
         /usr/local/bin/configure-resolv /usr/local/bin/resolver-web.js \
@@ -181,7 +184,7 @@ docker run --rm -i --entrypoint /bin/bash "$image" -se <<'IMAGE_SMOKE'
         node /usr/local/bin/resolver-web.js >"$tunnel_test_dir/second.log" 2>&1 &
     resolver_pid=$!
     for _ in $(seq 1 60); do
-        if curl -fsS http://127.0.0.1:18787/api/tunnel \
+        if curl -fsS http://127.0.0.1:18787/api/tunnel 2>/dev/null \
             | jq -e ".running == false" >/dev/null 2>&1; then
             break
         fi
@@ -308,7 +311,7 @@ status_page="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/status/")"
-grep -Fq 'Container status' <<<"$status_page"
+grep -Fq 'id="components"' <<<"$status_page"
 status_json="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
@@ -363,7 +366,7 @@ manager_page="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/manage/")"
-grep -Fq 'Certificate management' <<<"$manager_page"
+grep -Fq 'id="upload-form"' <<<"$manager_page"
 certificate_json="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
