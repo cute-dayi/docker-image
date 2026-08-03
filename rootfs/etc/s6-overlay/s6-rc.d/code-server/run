@@ -2,10 +2,29 @@
 set -e
 
 bind_addr="${CODE_SERVER_BIND_ADDR:-127.0.0.1:8080}"
-auth="${CODE_SERVER_AUTH:-password}"
 workdir="${CODE_SERVER_WORKDIR:-/workspace}"
+user_data_dir="${CODE_SERVER_USER_DATA_DIR:-/opt/__container/code-server}"
 
-mkdir -p "$workdir"
+if [ -n "${CODE_SERVER_AUTH+x}" ]; then
+    auth="$CODE_SERVER_AUTH"
+elif [ "${NGINX_ENABLE:-true}" = true ] \
+    && [ "${NGINX_UNIFIED_AUTH:-true}" = true ] \
+    && [ -n "${PASSWORD:-}" ]; then
+    auth=none
+    echo "[code-server] Using the unified Nginx login."
+else
+    auth=password
+fi
+
+case "$auth" in
+    password|none) ;;
+    *)
+        echo "[code-server] CODE_SERVER_AUTH must be password or none. Service will stay idle." >&2
+        exec sleep infinity
+        ;;
+esac
+
+mkdir -p "$workdir" "$user_data_dir"
 
 if [ "$auth" = "password" ] && [ -z "${PASSWORD:-}" ] && [ -z "${HASHED_PASSWORD:-}" ]; then
     echo "[code-server] CODE_SERVER_AUTH=password requires PASSWORD or HASHED_PASSWORD. Service will stay idle." >&2
@@ -16,4 +35,5 @@ exec code-server \
     --bind-addr "$bind_addr" \
     --auth "$auth" \
     --disable-telemetry \
+    --user-data-dir "$user_data_dir" \
     "$workdir"

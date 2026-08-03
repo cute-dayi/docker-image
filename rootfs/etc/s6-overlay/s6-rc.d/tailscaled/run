@@ -6,8 +6,9 @@ if [ "${TS_ENABLE:-false}" != "true" ]; then
     exec sleep infinity
 fi
 
-mkdir -p /run/tailscale /var/lib/tailscale
-chmod 700 /var/lib/tailscale 2>/dev/null || true
+state_dir="${TS_STATE_DIR:-/opt/__container/tailscale}"
+mkdir -p /run/tailscale "$state_dir"
+chmod 700 "$state_dir" 2>/dev/null || true
 
 if [ ! -c /dev/net/tun ]; then
     echo "[tailscaled] /dev/net/tun is unavailable; Tailscale will stay idle." >&2
@@ -15,5 +16,5 @@ if [ ! -c /dev/net/tun ]; then
 fi
 
 exec /usr/sbin/tailscaled \
-    --state=/var/lib/tailscale/tailscaled.state \
+    --state="$state_dir/tailscaled.state" \
     --socket=/run/tailscale/tailscaled.sock

@@ -98,7 +98,7 @@
     const resolverButtons = [...document.querySelectorAll('#resolver-form button')];
     const fields = ['local_nameserver', 'fallback_nameserver', 'check_domain'];
     const labels = { local: '本地 DNS', fallback: '备用 DNS' };
-    let statePath = '/root/.config/docker-image/resolver.json';
+    let statePath = '/opt/__container/resolver.json';
     let tunnelTimer;
 
     function configFromForm() {
@@ -236,7 +236,7 @@
         source.textContent = `部分配置由环境变量控制：${locked.join(', ')}。页面保存的值将在移除对应环境变量后生效。`;
         source.className = 'source warning';
       } else {
-        source.textContent = payload.stored ? '当前配置来自 /root 持久化文件，可以在此测试和修改。' : '当前使用默认配置，可以在此测试和保存。';
+        source.textContent = payload.stored ? '当前配置来自 /opt/__container 持久化文件，可以在此测试和修改。' : '当前使用默认配置，可以在此测试和保存。';
       }
       meta.textContent = payload.password_protected ? `此页面使用 Basic Auth 保护；持久化位置：${statePath}` : '当前显式启用了无认证模式，请勿将此页面直接暴露到公网。';
     }).catch((error) => { source.textContent = error.message; source.className = 'source warning'; });

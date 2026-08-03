@@ -76,11 +76,44 @@ write_status() {
     local dockerd_state
     local tailscale_state
     local services_json
+    local hostname_value
+    local uptime_seconds
+    local memory_total_kib
+    local memory_available_kib
+    local memory_used_bytes
+    local memory_total_bytes
+    local memory_usage_percent
+    local load_one
+    local load_five
+    local load_fifteen
+    local load_average
 
     workspace_usage="$(df -P /workspace 2>/dev/null | awk 'NR == 2 {print $5}')"
     [ -n "$workspace_usage" ] || workspace_usage=unknown
     sshfs_mounts="$(awk '$3 == "fuse.sshfs" {count++} END {print count + 0}' /proc/mounts 2>/dev/null)"
     [ -n "$sshfs_mounts" ] || sshfs_mounts=0
+    hostname_value="$(hostname 2>/dev/null || printf unknown)"
+    uptime_seconds="$(awk '{print int($1)}' /proc/uptime 2>/dev/null)"
+    [[ "$uptime_seconds" =~ ^[0-9]+$ ]] || uptime_seconds=0
+    memory_total_kib="$(awk '$1 == "MemTotal:" {print $2}' /proc/meminfo 2>/dev/null)"
+    memory_available_kib="$(awk '$1 == "MemAvailable:" {print $2}' /proc/meminfo 2>/dev/null)"
+    if [[ "$memory_total_kib" =~ ^[0-9]+$ ]] \
+        && [[ "$memory_available_kib" =~ ^[0-9]+$ ]] \
+        && ((memory_total_kib > 0 && memory_available_kib <= memory_total_kib)); then
+        memory_total_bytes=$((memory_total_kib * 1024))
+        memory_used_bytes=$(((memory_total_kib - memory_available_kib) * 1024))
+        memory_usage_percent=$(((memory_total_kib - memory_available_kib) * 100 / memory_total_kib))
+    else
+        memory_total_bytes=0
+        memory_used_bytes=0
+        memory_usage_percent=0
+    fi
+    read -r load_one load_five load_fifteen _ </proc/loadavg || true
+    load_average="$(jq -cn \
+        --arg one "${load_one:-0}" \
+        --arg five "${load_five:-0}" \
+        --arg fifteen "${load_fifteen:-0}" \
+        '[$one, $five, $fifteen]')"
     nginx_state=disabled
     if [ "${NGINX_ENABLE:-true}" = true ]; then
         nginx_state="$(process_state nginx)"
@@ -99,13 +132,19 @@ write_status() {
         --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg workspace_usage "$workspace_usage" \
         --argjson sshfs_mounts "$sshfs_mounts" \
+        --arg hostname "$hostname_value" \
+        --argjson uptime_seconds "$uptime_seconds" \
+        --argjson memory_used_bytes "$memory_used_bytes" \
+        --argjson memory_total_bytes "$memory_total_bytes" \
+        --argjson memory_usage_percent "$memory_usage_percent" \
+        --argjson load_average "$load_average" \
         --arg ssh "$(process_state sshd)" \
         --arg code_server "$(process_state_pattern '/usr/lib/code-server(/lib/node)?([[:space:]]|$)')" \
         --arg nginx "$nginx_state" \
         --arg dockerd "$dockerd_state" \
         --arg tailscale "$tailscale_state" \
         --argjson services "$services_json" \
-        '{generated_at: $generated_at, workspace_usage: $workspace_usage, sshfs_mounts: $sshfs_mounts, components: {ssh: $ssh, code_server: $code_server, nginx: $nginx, dockerd: $dockerd, tailscale: $tailscale}, services: $services}')"
+        '{generated_at: $generated_at, hostname: $hostname, uptime_seconds: $uptime_seconds, workspace_usage: $workspace_usage, memory_used_bytes: $memory_used_bytes, memory_total_bytes: $memory_total_bytes, memory_usage_percent: $memory_usage_percent, load_average: $load_average, sshfs_mounts: $sshfs_mounts, components: {ssh: $ssh, code_server: $code_server, nginx: $nginx, dockerd: $dockerd, tailscale: $tailscale}, services: $services}')"
     install -d -m 0755 "$status_dir"
     tmp_file="$(mktemp "${status_file}.XXXXXX")"
     printf '%s\n' "$payload" >"$tmp_file"

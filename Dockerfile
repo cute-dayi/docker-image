@@ -1,3 +1,12 @@
+FROM golang:1.26.5-bookworm AS manager-builder
+
+WORKDIR /src
+COPY go.mod ./
+COPY cmd/manager/ ./cmd/manager/
+RUN go test ./... && \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+      -o /out/docker-image-manager ./cmd/manager
+
 FROM debian:13-slim
 
 ARG DEBIAN_MIRROR=mirrors.ustc.edu.cn
@@ -12,6 +21,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     GITHUB_USER=rabbit-dayi \
     UV_LINK_MODE=symlink \
     UV_COMPILE_BYTECODE=1 \
+    UV_CACHE_DIR=/opt/__container/uv \
+    NPM_CONFIG_CACHE=/opt/__container/npm \
     S6_KEEP_ENV=1 \
     S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
     CODE_SERVER_BIND_ADDR=127.0.0.1:8080 \
@@ -20,18 +31,29 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NGINX_HTTP_PORT=80 \
     NGINX_HTTPS_PORT=443 \
     NGINX_HTTP_REDIRECT=true \
+    NGINX_UNIFIED_AUTH=true \
     NGINX_SERVER_NAMES=_ \
     NGINX_UPSTREAM=127.0.0.1:8080 \
+    CONTAINER_STATE_DIR=/opt/__container \
+    CODE_SERVER_USER_DATA_DIR=/opt/__container/code-server \
     TS_ENABLE=false \
+    TS_STATE_DIR=/opt/__container/tailscale \
     TS_AUTH_ONCE=true \
     TS_ACCEPT_DNS=false \
     TS_CONFIG_TIMEOUT=30 \
     DOCKERD_ROOTLESS_ENABLE=false \
     DOCKER_HOST=unix:///run/user/1000/docker.sock \
+    DOCKERD_CONFIG_DIR=/opt/__container/dockerd/config \
+    DOCKERD_CACHE_DIR=/opt/__container/dockerd/cache \
     STARTUP_BANNER=true \
     RESOLV_WEB_ENABLE=true \
     RESOLV_WEB_ALLOW_UNAUTHENTICATED=false \
     RESOLV_WEB_PORT=8787 \
+    MANAGER_ENABLE=true \
+    MANAGER_PORT=8788 \
+    MANAGER_CONFIG_DIR=/opt/__container \
+    RESOLV_STATE_FILE=/opt/__container/resolver.json \
+    DOCKERD_DATA_ROOT=/opt/__container/docker \
     STATUS_INTERVAL=5
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -116,10 +138,13 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends /tmp/code-server.deb; \
     rm -f /tmp/code-server.deb; \
     rm -rf /var/lib/apt/lists/*; \
-    mkdir -p /run/sshd /run/tailscale /run/user /var/lib/tailscale /root/.ssh /workspace; \
+    mkdir -p /run/sshd /run/tailscale /run/user /root/.ssh /workspace /opt/__container \
+      /opt/__container/code-server /opt/__container/tailscale /opt/__container/docker \
+      /opt/__container/dockerd/config /opt/__container/dockerd/cache \
+      /opt/__container/npm /opt/__container/uv; \
     install -d -m 0755 /etc/nginx/certs; \
     install -d -m 0700 -o dockerd -g dockerd \
-      /run/user/1000 /home/dockerd/.local/share/docker; \
+      /run/user/1000 /opt/__container/docker; \
     touch /root/.ssh/authorized_keys; \
     chmod 700 /root/.ssh; \
     chmod 600 /root/.ssh/authorized_keys; \
@@ -139,6 +164,7 @@ RUN set -eux; \
     tar -czf /usr/share/root_backup.tar.gz -C / root
 
 COPY rootfs/ /
+COPY --from=manager-builder /out/docker-image-manager /usr/local/bin/docker-image-manager
 
 RUN set -eux; \
     chmod +x \
@@ -147,6 +173,7 @@ RUN set -eux; \
       /etc/s6-overlay/scripts/configure-tailscale \
       /etc/s6-overlay/s6-rc.d/runtime-status/run \
       /etc/s6-overlay/s6-rc.d/resolver-web/run \
+      /etc/s6-overlay/s6-rc.d/manager/run \
       /usr/local/bin/docker-image-banner \
       /usr/local/bin/configure-resolv \
       /usr/local/bin/resolver-web.js \

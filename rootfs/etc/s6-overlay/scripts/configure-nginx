@@ -63,11 +63,35 @@ https_port=$((10#$https_port))
 upstream="$(normalize_upstream "${NGINX_UPSTREAM:-127.0.0.1:8080}")" \
     || fail "NGINX_UPSTREAM must be a safe host:port value."
 
+unified_auth="${NGINX_UNIFIED_AUTH:-true}"
+case "$unified_auth" in
+    true|false) ;;
+    *) fail "NGINX_UNIFIED_AUTH must be true or false." ;;
+esac
+unified_auth_enabled=false
+if [ "$unified_auth" = true ] && [ -n "${PASSWORD:-}" ]; then
+    unified_auth_enabled=true
+fi
+
 portal_path=/services
 status_path=/status
 status_json_path=/status.json
 dns_path=/dns
 dns_api_path=/dns/api
+manager_path=/manage
+manager_api_path=/manage/api
+manager_enabled="${MANAGER_ENABLE:-true}"
+case "$manager_enabled" in
+    true|false) ;;
+    *) fail "MANAGER_ENABLE must be true or false." ;;
+esac
+if [ "$manager_enabled" = true ] && [ "$unified_auth_enabled" != true ]; then
+    echo "[nginx-config] Certificate management disabled because unified authentication is unavailable."
+    manager_enabled=false
+fi
+manager_port="${MANAGER_PORT:-8788}"
+validate_port "$manager_port" || fail "MANAGER_PORT must be between 1 and 65535."
+manager_port=$((10#$manager_port))
 dns_web_enabled="${RESOLV_WEB_ENABLE:-true}"
 case "$dns_web_enabled" in
     true|false) ;;
@@ -80,6 +104,7 @@ case "$dns_allow_unauthenticated" in
 esac
 dns_password="${RESOLV_WEB_PASSWORD:-${PASSWORD:-}}"
 if [ "$dns_web_enabled" = true ] \
+    && [ "$unified_auth_enabled" != true ] \
     && [ -z "$dns_password" ] \
     && [ "$dns_allow_unauthenticated" != true ]; then
     echo "[nginx-config] DNS management disabled because no password is configured."
@@ -115,6 +140,8 @@ if [ -n "$service_links" ]; then
             && [ "$service_path" != "$status_json_path" ] \
             && [ "$service_path" != "$dns_path" ] \
             && [[ "$service_path" != "$dns_path"/* ]] \
+            && [ "$service_path" != "$manager_path" ] \
+            && [[ "$service_path" != "$manager_path"/* ]] \
             || fail "Service path ${service_path} is reserved for a built-in endpoint."
         service_upstream="$(normalize_upstream "$service_upstream")" \
             || fail "Service ${service_name} must use a safe host:port upstream."
@@ -165,6 +192,9 @@ default_cert="${default_cert_dir}/tls.crt"
 default_key="${default_cert_dir}/tls.key"
 mounted_cert=/etc/nginx/certs/tls.crt
 mounted_key=/etc/nginx/certs/tls.key
+manager_config_dir="${MANAGER_CONFIG_DIR:-/opt/__container}"
+uploaded_cert="${manager_config_dir}/tls/current/tls.crt"
+uploaded_key="${manager_config_dir}/tls/current/tls.key"
 
 cert_file=""
 key_file=""
@@ -176,6 +206,9 @@ if [ -n "${NGINX_TLS_CERT_FILE+x}" ] || [ -n "${NGINX_TLS_KEY_FILE+x}" ]; then
 elif [ -e "$mounted_cert" ] || [ -e "$mounted_key" ]; then
     cert_file="$mounted_cert"
     key_file="$mounted_key"
+elif [ -e "$uploaded_cert" ] || [ -e "$uploaded_key" ]; then
+    cert_file="$uploaded_cert"
+    key_file="$uploaded_key"
 else
     install -d -m 0755 "$runtime_dir"
     install -d -m 0700 "$default_cert_dir"
@@ -209,13 +242,27 @@ status_file="${status_dir}/status.json"
 status_page="${status_dir}/index.html"
 dns_dir="${runtime_dir}/dns"
 dns_page="${dns_dir}/index.html"
+manager_dir="${runtime_dir}/manage"
+manager_page="${manager_dir}/index.html"
 dns_auth_file="${runtime_dir}/resolver.htpasswd"
+gateway_auth_file="${runtime_dir}/gateway.htpasswd"
 install -d -m 0755 "$portal_dir"
 install -d -m 0755 "$status_dir"
+if [ "$unified_auth_enabled" = true ]; then
+    gateway_password_hash="$(openssl passwd -apr1 "$PASSWORD")" \
+        || fail "Could not generate the gateway password file."
+    printf 'admin:%s\n' "$gateway_password_hash" >"$gateway_auth_file"
+    chmod 0640 "$gateway_auth_file"
+    chown root:www-data "$gateway_auth_file"
+else
+    rm -f "$gateway_auth_file"
+fi
 if [ "$dns_web_enabled" = true ]; then
     install -d -m 0755 "$dns_dir"
     install -m 0644 /usr/local/share/docker-image/resolver.html "$dns_page"
-    if [ -n "$dns_password" ]; then
+    if [ "$unified_auth_enabled" = true ]; then
+        rm -f "$dns_auth_file"
+    elif [ -n "$dns_password" ]; then
         dns_password_hash="$(openssl passwd -apr1 "$dns_password")" \
             || fail "Could not generate the DNS page password file."
         printf 'admin:%s\n' "$dns_password_hash" >"$dns_auth_file"
@@ -224,6 +271,10 @@ if [ "$dns_web_enabled" = true ]; then
     else
         rm -f "$dns_auth_file"
     fi
+fi
+if [ "$manager_enabled" = true ]; then
+    install -d -m 0755 "$manager_dir"
+    install -m 0644 /usr/local/share/docker-image/manager.html "$manager_page"
 fi
 cat >"$portal_file" <<'EOF'
 <!doctype html>
@@ -265,6 +316,10 @@ printf '      <a class="service service-secondary" href="/status/"><strong>Runti
 if [ "$dns_web_enabled" = true ]; then
     printf '      <a class="service service-secondary" href="%s/"><strong>DNS settings</strong><span>%s/</span></a>\n' \
         "$dns_path" "$dns_path" >>"$portal_file"
+fi
+if [ "$manager_enabled" = true ]; then
+    printf '      <a class="service service-secondary" href="%s/"><strong>Certificates</strong><span>%s/</span></a>\n' \
+        "$manager_path" "$manager_path" >>"$portal_file"
 fi
 cat >>"$portal_file" <<'EOF'
     </section>
@@ -367,8 +422,9 @@ cat >"$status_page" <<'EOF'
 </body>
 </html>
 EOF
+install -m 0644 /usr/local/share/docker-image/status.html "$status_page"
 cat >"$status_file" <<'EOF'
-{"generated_at":null,"workspace_usage":"unknown","sshfs_mounts":0,"components":{},"services":[]}
+{"generated_at":null,"hostname":"unknown","uptime_seconds":0,"workspace_usage":"unknown","memory_used_bytes":0,"memory_total_bytes":0,"memory_usage_percent":0,"load_average":["0","0","0"],"sshfs_mounts":0,"components":{},"services":[]}
 EOF
 chmod 0644 "$status_page" "$status_file"
 
@@ -377,6 +433,15 @@ write_dns_auth() {
         cat >>"$config_file" <<EOF
             auth_basic "DNS settings";
             auth_basic_user_file ${dns_auth_file};
+EOF
+    fi
+}
+
+write_gateway_auth() {
+    if [ "$unified_auth_enabled" = true ]; then
+        cat >>"$config_file" <<EOF
+        auth_basic "Docker image";
+        auth_basic_user_file ${gateway_auth_file};
 EOF
     fi
 }
@@ -455,6 +520,38 @@ EOF
 EOF
     fi
 
+    if [ "$manager_enabled" = true ]; then
+        cat >>"$config_file" <<EOF
+        location = ${manager_path} {
+            return 308 ${manager_path}/;
+        }
+
+        location = ${manager_api_path} {
+            return 308 ${manager_api_path}/;
+        }
+
+        location = ${manager_path}/ {
+            root ${runtime_dir};
+            try_files ${manager_path}/index.html =404;
+            default_type text/html;
+            add_header Cache-Control "no-store";
+        }
+
+        location ^~ ${manager_api_path}/ {
+            proxy_pass http://127.0.0.1:${manager_port}/api/;
+            proxy_http_version 1.1;
+            proxy_set_header Host \$http_host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+            proxy_request_buffering off;
+            client_max_body_size 5m;
+            proxy_read_timeout 30s;
+            proxy_send_timeout 30s;
+        }
+EOF
+    fi
+
     for service_index in "${!service_paths[@]}"; do
         service_path="${service_paths[$service_index]}"
         service_upstream="${service_upstreams[$service_index]}"
@@ -486,6 +583,16 @@ write_default_proxy_location() {
     local protocol=$1
 
     cat >>"$config_file" <<EOF
+        location = /healthz {
+            auth_basic off;
+            proxy_pass http://${upstream}/healthz;
+            proxy_http_version 1.1;
+            proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto ${protocol};
+        }
+
         location / {
             proxy_pass http://${upstream};
             proxy_http_version 1.1;
@@ -539,6 +646,7 @@ EOF
 if [ "$http_redirect" = "true" ]; then
     printf '        return 308 https://%s$request_uri;\n' "$redirect_authority" >>"$config_file"
 else
+    write_gateway_auth
     write_service_locations http
     write_default_proxy_location http
 fi
@@ -558,6 +666,7 @@ cat >>"$config_file" <<EOF
         ssl_session_timeout 10m;
 EOF
 
+write_gateway_auth
 write_service_locations https
 write_default_proxy_location https
 

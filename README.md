@@ -15,7 +15,7 @@
 - Mihomo 共享网络场景下的 DNS 探测、测试页面与安全补充
 - 常用工具：`git`、`curl`、`wget`、`vim`、`tmux`、`ping`、`iproute2`、`net-tools`、`traceroute`、`procps`，以及常用维护工具
 
-镜像使用 `/init` 作为 PID 1。启动时会恢复空的 `/root` 卷、读取持久化 DNS 配置、更新 GitHub SSH 公钥、生成 SSH host keys 和默认 TLS 证书，然后由 s6-overlay 分别管理 `sshd`、`code-server`、`nginx`、DNS 管理页、可选的 `tailscaled` 和 rootless `dockerd`。
+镜像使用 `/init` 作为 PID 1。启动时会恢复空的 `/root` 配置、读取 `/opt/__container` 下的持久化状态、更新 GitHub SSH 公钥、生成 SSH host keys 和默认 TLS 证书，然后由 s6-overlay 分别管理 `sshd`、`code-server`、`nginx`、DNS 管理页、可选的 `tailscaled` 和 rootless `dockerd`。
 
 普通 SSH/code-server 模式不需要 `privileged`、systemd、`/sys/fs/cgroup` 或 Compose 的 `init: true`。启用 Tailscale 内核网络时才需要 `/dev/net/tun`、`NET_ADMIN` 和 `NET_RAW`；启用 rootless Docker-in-Docker 时需要外层容器使用 `--privileged`，具体原因和使用方式见下文。
 
@@ -86,7 +86,7 @@ fusermount3 -u /workspace/remote
 
 普通 Docker 容器不会因为这个功能被强制改成公共 DNS：如果没有检测到本地 Mihomo DNS，默认保留 Docker 注入的 DNS（通常是 `127.0.0.11`）。确实需要在本地 DNS 不响应时也尝试 `1.1.1.1`，可设置 `RESOLV_FALLBACK_ALWAYS=true`。对于 Docker 的文件挂载，脚本会在原子替换失败时尝试原地写入；符号链接、只读挂载或无法写入时，只记录提示并保留原文件。
 
-当没有通过环境变量锁定 DNS 参数时，可访问 `https://<域名>/dns/` 打开 DNS 管理页，填写参数后执行“测试 DNS”或“保存并应用”。配置默认持久化到 `/root/.config/docker-image/resolver.json`，因此挂载 `/root` 后重建容器仍会保留。设置 `RESOLV_AUTO_CONFIG`、`RESOLV_LOCAL_NAMESERVER`、`RESOLV_FALLBACK_NAMESERVER`、`RESOLV_FALLBACK_ALWAYS` 或 `RESOLV_CHECK_DOMAIN` 后，对应字段由环境变量控制，页面不会覆盖它们。
+当没有通过环境变量锁定 DNS 参数时，可访问 `https://<域名>/dns/` 打开 DNS 管理页，填写参数后执行“测试 DNS”或“保存并应用”。配置默认持久化到 `/opt/__container/resolver.json`，只需挂载 `/opt/__container` 即可跨容器重建保留。设置 `RESOLV_AUTO_CONFIG`、`RESOLV_LOCAL_NAMESERVER`、`RESOLV_FALLBACK_NAMESERVER`、`RESOLV_FALLBACK_ALWAYS` 或 `RESOLV_CHECK_DOMAIN` 后，对应字段由环境变量控制，页面不会覆盖它们。
 
 页面下方的“临时 Cloudflare Tunnel”可以填写 `127.0.0.1:8080`、`http://127.0.0.1:8080` 或其他容器内 HTTP(S) 服务地址，点击“新建临时隧道”后等待随机的 `https://*.trycloudflare.com` 链接，再用“停止隧道”回收进程。它调用 Quick Tunnel（等价于 `cloudflared tunnel --no-autoupdate --url ...`），不需要 Cloudflare 账号或 API token；进程、URL 和日志只保存在 `/run` 内存文件系统中，不会写入 `/root`。Cloudflare 将 Quick Tunnel 定位为开发测试功能，并有并发请求数和 SSE 等限制，生产环境应使用正式的命名 Tunnel。
 
@@ -102,7 +102,7 @@ services:
     image: ghcr.io/rabbit-dayi/docker-image:latest
     network_mode: "container:mihomo-px-2-898989"
     environment:
-      RESOLV_WEB_PASSWORD: change-this-password
+      PASSWORD: change-this-password
       RESOLV_AUTO_CONFIG: "true"
       RESOLV_LOCAL_NAMESERVER: 127.0.0.1
       RESOLV_FALLBACK_NAMESERVER: 1.1.1.1
@@ -131,7 +131,7 @@ docker run -d \
   -p 2222:22 \
   -p 80:80 \
   -p 443:443 \
-  -v docker-image-root:/root \
+  -v docker-image-state:/opt/__container \
   -v docker-image-workspace:/workspace \
   ghcr.io/rabbit-dayi/docker-image:latest
 ```
@@ -151,12 +151,12 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - docker-image-root:/root
+      - docker-image-state:/opt/__container
       - docker-image-workspace:/workspace
     restart: unless-stopped
 
 volumes:
-  docker-image-root:
+  docker-image-state:
   docker-image-workspace:
 ```
 
@@ -197,6 +197,10 @@ environment:
 
 访问 `https://<域名>/status/` 可以查看 SSH、Nginx、code-server、rootless DIND、Tailscale 的状态，以及工作区占用、SSHFS 挂载数量和各个服务上游的连通性。页面每 5 秒刷新一次；对应的机器可读接口是 `/status.json`。状态服务只写入这些运行指标，不会暴露密码、auth key 或其他环境变量。
 
+### 证书管理页
+
+设置 `PASSWORD` 后访问 `https://<域名>/manage/`，可以查看当前证书的域名、签发者、有效期和指纹，并上传新的证书链和未加密私钥。上传后会在 `/opt/__container/tls/versions/` 保存版本，原子切换 `current` 链接并热加载 Nginx；如果校验或热加载失败，会自动恢复上一版。通过 `NGINX_TLS_CERT_FILE`/`NGINX_TLS_KEY_FILE` 或 `/etc/nginx/certs` 提供的证书属于外部托管，只读展示，不允许页面覆盖。证书文件上传和管理接口默认只在统一 Nginx 登录后可见。
+
 ### TLS 证书
 
 没有提供证书时，容器每次创建会自动生成一个有效期 10 年的自签名证书，放在临时目录 `/run/nginx/default-certificate/`。它让 HTTPS 开箱可用，但浏览器会显示不受信任警告，不应作为生产证书。
@@ -212,7 +216,7 @@ docker run -d \
   -p 80:80 \
   -p 443:443 \
   -v ./certs:/etc/nginx/certs:ro \
-  -v docker-image-root:/root \
+  -v docker-image-state:/opt/__container \
   -v docker-image-workspace:/workspace \
   ghcr.io/rabbit-dayi/docker-image:latest
 ```
@@ -246,13 +250,12 @@ docker run -d \
   -p 2222:22 \
   -p 80:80 \
   -p 443:443 \
-  -v docker-image-root:/root \
+  -v docker-image-state:/opt/__container \
   -v docker-image-workspace:/workspace \
-  -v docker-image-docker:/home/dockerd/.local/share/docker \
   ghcr.io/rabbit-dayi/docker-image:latest
 ```
 
-`dockerd` 以镜像内 UID 1000 的 `dockerd` 用户运行；root 的 SSH、终端和 code-server 已预设 `DOCKER_HOST=unix:///run/user/1000/docker.sock`，进入后可直接执行：
+`dockerd` 以镜像内 UID 1000 的 `dockerd` 用户运行；root 的 SSH、终端和 code-server 已预设 `DOCKER_HOST=unix:///run/user/1000/docker.sock`，Docker 数据默认位于 `/opt/__container/docker`，进入后可直接执行：
 
 ```bash
 docker info
@@ -261,7 +264,7 @@ docker buildx version
 docker compose version
 ```
 
-Docker API 默认不监听 TCP 端口，也不需要挂载宿主机的 `/var/run/docker.sock`。镜像中的 Docker 数据位于 `/home/dockerd/.local/share/docker`，应单独持久化，不要混入 `/root` 卷。
+Docker API 默认不监听 TCP 端口，也不需要挂载宿主机的 `/var/run/docker.sock`。镜像中的 Docker 数据位于 `/opt/__container/docker`，与其他应用状态统一放在 `/opt/__container`。
 
 Docker 官方的 rootless Docker-in-Docker 运行方式仍要求外层容器放开 seccomp、AppArmor 和 mount mask；本镜像使用文档推荐的 `--privileged` 方式。rootless 仅确保内层 `dockerd` 不以外层容器的 root 身份运行，不能抵消 `--privileged` 带来的外层容器风险。因此只应为受信任的开发或 CI 工作负载启用此模式。
 
@@ -281,15 +284,13 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - docker-image-root:/root
+      - docker-image-state:/opt/__container
       - docker-image-workspace:/workspace
-      - docker-image-docker:/home/dockerd/.local/share/docker
     restart: unless-stopped
 
 volumes:
-  docker-image-root:
+  docker-image-state:
   docker-image-workspace:
-  docker-image-docker:
 ```
 
 启用前，宿主机必须允许非特权 user namespace；服务启动时还会检查 `/dev/fuse`。条件不满足时 rootless `dockerd` 会保持 idle，SSH 和 code-server 不受影响。rootless Docker 的已知限制仍然适用，例如默认不能发布低于 1024 的端口，且没有 systemd/cgroup v2 委派时部分容器级资源限制不会生效。
@@ -345,14 +346,14 @@ https://github.com/rabbit-dayi.keys
 https://localhost
 ```
 
-默认使用 `PASSWORD` 或 `HASHED_PASSWORD` 认证：
+默认只需设置一个 `PASSWORD`。Nginx 会统一保护 code-server、服务跳转页、状态页和 DNS 管理页，用户名为 `admin`；浏览器在同一域名下认证一次后即可访问全部页面。code-server 此时自动使用 `auth=none`，不会再显示第二个登录页：
 
 ```yaml
 environment:
   PASSWORD: change-this-password
 ```
 
-如果 `CODE_SERVER_AUTH=password` 但没有提供密码，code-server 会保持 idle，不会反复重启刷日志。
+设置 `NGINX_UNIFIED_AUTH=false` 可关闭统一认证并恢复 code-server 自带登录页。显式设置 `CODE_SERVER_AUTH` 会覆盖自动选择；如果选择 `password` 但没有提供 `PASSWORD` 或 `HASHED_PASSWORD`，code-server 会保持 idle，不会反复重启刷日志。显式指定 `CODE_SERVER_AUTH=password` 时会保留 code-server 自带的第二层登录；希望一次密码访问全部页面时不要覆盖默认的自动设置。只有 `HASHED_PASSWORD` 时无法生成 Nginx Basic Auth 文件，因此仍使用 code-server 自带登录。
 
 本地使用默认自签名证书时，需要在浏览器确认一次证书警告；命令行检查可使用 `curl -k https://localhost/healthz`。部署域名和正式证书后，访问 `https://<你的域名>`。
 
@@ -390,18 +391,16 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - docker-image-root:/root
+      - docker-image-state:/opt/__container
       - docker-image-workspace:/workspace
-      - docker-image-tailscale:/var/lib/tailscale
     restart: unless-stopped
 
 volumes:
-  docker-image-root:
+  docker-image-state:
   docker-image-workspace:
-  docker-image-tailscale:
 ```
 
-不需要 `privileged: true`。`/var/lib/tailscale` 应持久化，否则容器重建后可能在 tailnet 中生成新的节点身份。LocalAPI socket 位于临时目录 `/run/tailscale/tailscaled.sock`，不应持久化。
+不需要 `privileged: true`。Tailscale 节点身份和状态默认持久化到 `/opt/__container/tailscale`，因此只需持久化 `/opt/__container`。LocalAPI socket 位于临时目录 `/run/tailscale/tailscaled.sock`，不应持久化。
 
 Tailscale 是附加服务：缺少 auth key、控制面不可达、认证失败、缺少 TUN 或 capabilities 时，SSH 和 code-server 仍会继续运行。可以进入容器后手工检查：
 
@@ -423,14 +422,19 @@ docker exec -it docker-image tailscale \
 | --- | --- | --- |
 | `GITHUB_USER` | `rabbit-dayi` | 下载 `https://github.com/<user>.keys`；设为空可禁用自动下载。 |
 | `CODE_SERVER_BIND_ADDR` | `127.0.0.1:8080` | code-server 监听地址；默认只允许 Nginx 反代。 |
-| `CODE_SERVER_AUTH` | `password` | code-server 认证模式：`password` 或 `none`。 |
-| `PASSWORD` | 未设置 | code-server 明文密码。 |
-| `HASHED_PASSWORD` | 未设置 | code-server 哈希密码，适合长期部署。 |
+| `CODE_SERVER_AUTH` | 自动 | 未设置时，有统一 Nginx 认证则使用 `none`，否则使用 `password`；也可显式设置 `password` 或 `none`。 |
+| `PASSWORD` | 未设置 | 统一 Nginx 登录、code-server 和 DNS 管理页共用的明文密码。 |
+| `HASHED_PASSWORD` | 未设置 | 仅供 code-server 自带登录使用的哈希密码，适合不启用统一认证的长期部署。 |
 | `CODE_SERVER_WORKDIR` | `/workspace` | code-server 默认工作目录。 |
+| `CODE_SERVER_USER_DATA_DIR` | `/opt/__container/code-server` | code-server 用户数据、扩展和设置的持久化目录。 |
+| `CONTAINER_STATE_DIR` | `/opt/__container` | 应用默认持久化根目录；各服务的状态目录默认都在这里。 |
+| `UV_CACHE_DIR` | `/opt/__container/uv` | uv 包缓存目录。 |
+| `NPM_CONFIG_CACHE` | `/opt/__container/npm` | npm 包缓存目录。 |
 | `NGINX_ENABLE` | `true` | 严格设为 `true` 时启用统一 HTTPS Web 入口。 |
 | `NGINX_HTTP_PORT` | `80` | Nginx HTTP 监听端口。 |
 | `NGINX_HTTPS_PORT` | `443` | Nginx HTTPS 监听端口。 |
 | `NGINX_HTTP_REDIRECT` | `true` | 是否将 HTTP 以 308 重定向到 HTTPS；设为 `false` 时 HTTP 也反代到上游。 |
+| `NGINX_UNIFIED_AUTH` | `true` | 有 `PASSWORD` 时使用一次 Nginx Basic Auth 保护全部 Web 页面；用户名固定为 `admin`。 |
 | `NGINX_SERVER_NAMES` | `_` | 逗号分隔的精确域名或通配域名，用于 Nginx `server_name` 和默认证书 SAN。 |
 | `NGINX_UPSTREAM` | `127.0.0.1:8080` | Nginx 根路径反代的 `host:port` 上游；更改 code-server 端口时一并更新。 |
 | `NGINX_SERVICE_LINKS` | 未设置 | 可选的动态内部服务列表，格式为 `名称|/路径|host:port;...`；生成 `/services/` 页面和对应反代路径。 |
@@ -439,7 +443,7 @@ docker exec -it docker-image tailscale \
 | `RESOLV_WEB_PORT` | `8787` | DNS 管理 API 仅监听容器内 `127.0.0.1` 的端口。 |
 | `RESOLV_WEB_PASSWORD` | 未设置 | DNS 管理页的 Basic Auth 密码；未设置时回退使用 `PASSWORD`。 |
 | `RESOLV_WEB_ALLOW_UNAUTHENTICATED` | `false` | 没有管理页密码时是否仍启用页面和 API；仅适合受信任网络内临时测试。 |
-| `RESOLV_STATE_FILE` | `/root/.config/docker-image/resolver.json` | DNS 页面保存的持久化配置文件；临时 Cloudflare Tunnel 不使用此文件。 |
+| `RESOLV_STATE_FILE` | `/opt/__container/resolver.json` | DNS 页面保存的持久化配置文件；临时 Cloudflare Tunnel 不使用此文件。 |
 | `RESOLV_AUTO_CONFIG` | `true` | 是否在启动时探测并补充 DNS；设为 `false` 可完全禁用。 |
 | `RESOLV_LOCAL_NAMESERVER` | `127.0.0.1` | Mihomo 本地 DNS 的 IPv4 地址，探测端口固定为 `53`。 |
 | `RESOLV_FALLBACK_NAMESERVER` | `1.1.1.1` | 公共 DNS 备用 IPv4 地址，探测端口固定为 `53`。 |
@@ -448,6 +452,7 @@ docker exec -it docker-image tailscale \
 | `NGINX_TLS_CERT_FILE` | 未设置 | 自定义证书绝对路径；必须与 `NGINX_TLS_KEY_FILE` 一同设置。 |
 | `NGINX_TLS_KEY_FILE` | 未设置 | 自定义未加密私钥绝对路径；必须与 `NGINX_TLS_CERT_FILE` 一同设置。 |
 | `TS_ENABLE` | `false` | 设为严格的 `true` 才启用 Tailscale。 |
+| `TS_STATE_DIR` | `/opt/__container/tailscale` | Tailscale 节点身份和状态目录。 |
 | `TS_AUTHKEY` | 未设置 | Tailscale auth key，只应在运行时安全注入。 |
 | `TS_AUTH_ONCE` | `true` | 已有有效持久化登录时不重复使用 auth key。 |
 | `TS_HOSTNAME` | 未设置 | 可选的 tailnet 节点名。 |
@@ -455,6 +460,12 @@ docker exec -it docker-image tailscale \
 | `TS_ADVERTISE_TAGS` | 未设置 | 逗号分隔的 tags，例如 `tag:dev,tag:container`。 |
 | `TS_CONFIG_TIMEOUT` | `30` | 等待和配置 Tailscale 的秒数，允许 5–300。 |
 | `DOCKERD_ROOTLESS_ENABLE` | `false` | 严格设为 `true` 才启动镜像内的 rootless Docker daemon；需要外层容器使用 `--privileged`。 |
+| `DOCKERD_DATA_ROOT` | `/opt/__container/docker` | rootless Docker 镜像、容器、卷和构建缓存目录。 |
+| `DOCKERD_CONFIG_DIR` | `/opt/__container/dockerd/config` | rootless Docker 的 XDG 配置目录。 |
+| `DOCKERD_CACHE_DIR` | `/opt/__container/dockerd/cache` | rootless Docker 的 XDG 缓存目录。 |
+| `MANAGER_ENABLE` | `true` | 是否启用 `/manage/` 证书管理页；需要 `PASSWORD` 和统一 Nginx 认证。 |
+| `MANAGER_PORT` | `8788` | Go 证书管理 API 仅监听容器内 `127.0.0.1` 的端口。 |
+| `MANAGER_CONFIG_DIR` | `/opt/__container` | 证书版本和其他管理状态的持久化根目录。 |
 | `DOCKER_HOST` | `unix:///run/user/1000/docker.sock` | 镜像内 Docker CLI 默认连接的 rootless daemon socket。 |
 | `STARTUP_BANNER` | `true` | 是否在容器初始化日志中显示启动横幅。 |
 | `TZ` | `Asia/Shanghai` | 容器时区。 |
@@ -492,12 +503,10 @@ docker run -d \
 
 | 路径 | 用途 |
 | --- | --- |
-| `/root` | root 用户配置、SSH 配置、code-server 用户数据。 |
+| `/opt/__container` | 所有应用持久化状态和包缓存：DNS、证书、code-server 用户数据、Tailscale 身份、rootless Docker、uv 和 npm。 |
 | `/workspace` | 项目代码和默认工作目录。 |
-| `/var/lib/tailscale` | 可选的 Tailscale 节点身份和状态。 |
-| `/home/dockerd/.local/share/docker` | 可选的 rootless Docker-in-Docker 镜像、容器、卷和构建缓存。 |
 
-新的空 `/root` 卷会自动恢复 `.bashrc`、`.profile` 等默认配置。
+新的空 `/root` 目录仍会自动恢复 `.bashrc`、`.profile` 等默认配置；如需持久化 SSH 公钥，建议单独挂载 `/root/.ssh/authorized_keys`，应用状态不需要放入 `/root`。
 
 容器内临时执行 `apt install` 只会写入当前容器的 writable layer；容器删除重建后会丢失。长期需要的包应写入派生镜像：
 
@@ -603,7 +612,7 @@ docker exec docker-image ls -l /run/user/1000/docker.sock /dev/fuse
 
 ### DNS 或 GitHub 暂时不可用
 
-GitHub SSH key 下载和 Tailscale 配置失败都不会让 SSH/code-server 无限重启。可以修复 Docker DNS，或使用持久化 `/root` 及手工挂载的 `authorized_keys`。
+GitHub SSH key 下载和 Tailscale 配置失败都不会让 SSH/code-server 无限重启。可以修复 Docker DNS，或手工挂载 `/root/.ssh/authorized_keys`；应用状态统一保存在 `/opt/__container`。
 
 ## 安全说明
 
@@ -612,6 +621,6 @@ GitHub SSH key 下载和 Tailscale 配置失败都不会让 SSH/code-server 无�
 - 默认 TLS 证书是运行时生成的自签名证书，仅用于开箱访问；公网部署应挂载受信任 CA 签发的证书和私钥。
 - auth key 应尽量使用一次性、短期、ephemeral 或受 tag 限制的 key；泄露后立即在 Tailscale 管理控制台吊销。
 - 对外暴露 code-server 时应使用强密码，或者通过 Tailscale、反向代理、内网或 SSH tunnel 访问。
-- 不建议在公网直接使用 `CODE_SERVER_AUTH=none`。
+- 不建议在公网关闭统一认证后直接使用 `CODE_SERVER_AUTH=none`。
 - Tailscale 模式本身只需要有限 capabilities，不需要 `privileged: true`。
 - rootless Docker-in-Docker 的 daemon 不是外层 root，但该模式的外层容器仍需 `--privileged`；不要将其用于不受信任的代码或多租户环境。

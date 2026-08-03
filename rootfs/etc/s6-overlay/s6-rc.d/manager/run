@@ -1,0 +1,16 @@
+#!/bin/bash
+set -euo pipefail
+
+if [ "${MANAGER_ENABLE:-true}" != true ]; then
+    echo "[manager] Disabled. Set MANAGER_ENABLE=true to enable certificate management."
+    exec sleep infinity
+fi
+
+if [ "${NGINX_ENABLE:-true}" != true ] \
+    || [ "${NGINX_UNIFIED_AUTH:-true}" != true ] \
+    || [ -z "${PASSWORD:-}" ]; then
+    echo "[manager] Disabled because unified Nginx authentication is unavailable."
+    exec sleep infinity
+fi
+
+exec /usr/local/bin/docker-image-manager

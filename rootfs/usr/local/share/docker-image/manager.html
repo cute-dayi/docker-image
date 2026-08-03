@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>证书管理</title>
+  <style>
+    :root { color: #202522; background: #f4f6f3; font-family: system-ui, -apple-system, sans-serif; }
+    * { box-sizing: border-box; letter-spacing: 0; }
+    body { min-height: 100vh; margin: 0; }
+    a { color: inherit; text-decoration: none; }
+    .topbar { min-height: 58px; border-bottom: 1px solid #303632; color: #f7faf7; background: #1c211e; }
+    .topbar-inner { width: min(100% - 32px, 1080px); min-height: 58px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 750; }
+    .brand-mark { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid #657069; border-radius: 6px; color: #66d4ae; font-family: ui-monospace, monospace; font-size: 13px; }
+    nav { display: flex; align-items: center; gap: 18px; color: #bcc5bf; font-size: 13px; }
+    nav a:hover, nav a:focus-visible { color: #ffffff; outline: none; }
+    main { width: min(100% - 32px, 1080px); margin: 0 auto; padding: 32px 0 48px; }
+    header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 26px; }
+    .eyebrow { margin: 0 0 7px; color: #27795f; font-size: 12px; font-weight: 750; text-transform: uppercase; }
+    h1, h2, p { margin-top: 0; }
+    h1 { margin-bottom: 0; font-size: 30px; line-height: 1.2; }
+    h2 { margin-bottom: 18px; font-size: 16px; }
+    .state { display: inline-flex; align-items: center; gap: 8px; min-height: 30px; color: #526059; font-size: 13px; }
+    .state::before { width: 8px; height: 8px; border-radius: 50%; background: #8a958e; content: ''; }
+    .state.ready::before { background: #22a06b; }
+    .state.error { color: #a33c35; }
+    .state.error::before { background: #d55248; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr); gap: 18px; align-items: start; }
+    .panel { border: 1px solid #d2d9d4; border-radius: 8px; background: #ffffff; }
+    .panel-body { padding: 22px; }
+    .facts { margin: 0; display: grid; grid-template-columns: minmax(130px, .35fr) minmax(0, 1fr); }
+    .facts div { display: contents; }
+    dt, dd { margin: 0; padding: 12px 0; border-bottom: 1px solid #edf0ee; }
+    dt { color: #68736d; font-size: 13px; }
+    dd { min-width: 0; color: #252b27; font-family: ui-monospace, monospace; font-size: 13px; overflow-wrap: anywhere; }
+    .facts div:last-child dt, .facts div:last-child dd { border-bottom: 0; }
+    form { display: grid; gap: 16px; }
+    label { display: grid; gap: 8px; color: #46514b; font-size: 13px; font-weight: 700; }
+    input[type="file"] { width: 100%; min-height: 44px; padding: 7px; border: 1px solid #c4cdc7; border-radius: 6px; color: #3b443f; background: #fafcf9; font: inherit; }
+    input[type="file"]::file-selector-button { min-height: 28px; margin-right: 10px; padding: 4px 10px; border: 1px solid #aebbb3; border-radius: 5px; color: #344039; background: #ffffff; cursor: pointer; }
+    button { min-height: 42px; padding: 9px 14px; border: 1px solid #1d7659; border-radius: 6px; color: #ffffff; background: #1d7659; font: inherit; font-weight: 750; cursor: pointer; }
+    button:hover, button:focus-visible { background: #155e46; outline: 2px solid #a9d9c7; outline-offset: 2px; }
+    button:disabled, input:disabled { opacity: .55; cursor: not-allowed; }
+    .message { min-height: 20px; margin: 16px 0 0; color: #5b6660; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+    .message.error { color: #a33c35; }
+    .source-badge { display: inline-flex; min-height: 25px; align-items: center; padding: 3px 8px; border: 1px solid #b8ccc2; border-radius: 5px; color: #23694f; background: #eef8f3; font: 700 12px ui-monospace, monospace; }
+    @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } header { align-items: flex-start; flex-direction: column; gap: 12px; } nav { gap: 12px; } .topbar-inner { width: min(100% - 24px, 1080px); } main { width: min(100% - 24px, 1080px); padding-top: 24px; } }
+    @media (max-width: 460px) { nav a:first-child { display: none; } .facts { grid-template-columns: 1fr; } .facts div { display: block; padding: 10px 0; border-bottom: 1px solid #edf0ee; } dt, dd { padding: 2px 0; border: 0; } }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/services/"><span class="brand-mark">D/</span><span>Docker Image</span></a>
+      <nav aria-label="主导航"><a href="/">工作区</a><a href="/status/">状态</a><a href="/dns/">DNS</a></nav>
+    </div>
+  </div>
+  <main>
+    <header>
+      <div><p class="eyebrow">Gateway control</p><h1>证书管理</h1></div>
+      <span id="state" class="state">正在读取</span>
+    </header>
+    <div class="layout">
+      <section class="panel" aria-labelledby="certificate-title">
+        <div class="panel-body">
+          <h2 id="certificate-title">当前证书 <span id="source" class="source-badge">--</span></h2>
+          <dl class="facts">
+            <div><dt>域名</dt><dd id="names">--</dd></div>
+            <div><dt>主题</dt><dd id="subject">--</dd></div>
+            <div><dt>签发者</dt><dd id="issuer">--</dd></div>
+            <div><dt>有效期至</dt><dd id="expires">--</dd></div>
+            <div><dt>剩余时间</dt><dd id="remaining">--</dd></div>
+            <div><dt>SHA-256</dt><dd id="fingerprint">--</dd></div>
+          </dl>
+        </div>
+      </section>
+      <section class="panel" aria-labelledby="upload-title">
+        <div class="panel-body">
+          <h2 id="upload-title">上传并启用</h2>
+          <form id="upload-form">
+            <label>证书链<input id="certificate" name="certificate" type="file" accept=".pem,.crt,application/x-pem-file" required></label>
+            <label>私钥<input id="private-key" name="private_key" type="file" accept=".pem,.key,application/x-pem-file" required></label>
+            <button id="upload" type="submit">上传并热重载</button>
+          </form>
+          <p id="message" class="message" aria-live="polite"></p>
+        </div>
+      </section>
+    </div>
+  </main>
+  <script>
+    const fields = ['names', 'subject', 'issuer', 'expires', 'remaining', 'fingerprint'];
+    const state = document.getElementById('state');
+    const source = document.getElementById('source');
+    const message = document.getElementById('message');
+    const form = document.getElementById('upload-form');
+    const upload = document.getElementById('upload');
+
+    function showMessage(text, error = false) {
+      message.textContent = text;
+      message.className = `message${error ? ' error' : ''}`;
+    }
+
+    function render(info) {
+      source.textContent = info.source || 'unknown';
+      document.getElementById('names').textContent = (info.names || []).join(', ') || '--';
+      document.getElementById('subject').textContent = info.subject || '--';
+      document.getElementById('issuer').textContent = info.issuer || '--';
+      document.getElementById('expires').textContent = info.not_after ? new Date(info.not_after).toLocaleString() : '--';
+      document.getElementById('remaining').textContent = Number.isFinite(info.days_remaining) ? `${info.days_remaining} 天` : '--';
+      document.getElementById('fingerprint').textContent = info.fingerprint_sha256 || '--';
+      [...form.elements].forEach((element) => { element.disabled = !info.upload_enabled; });
+      state.textContent = info.error ? '证书异常' : '证书已加载';
+      state.className = `state ${info.error ? 'error' : 'ready'}`;
+      if (info.error) showMessage(info.error, true);
+      else if (!info.upload_enabled) showMessage(`证书由 ${info.locked_reason || info.source} 管理，网页上传已锁定。`);
+      else showMessage('');
+    }
+
+    async function refresh() {
+      const response = await fetch('/manage/api/certificate', { cache: 'no-store' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      render(payload);
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      upload.disabled = true;
+      showMessage('正在校验并切换证书...');
+      try {
+        const body = new FormData();
+        body.append('certificate', document.getElementById('certificate').files[0]);
+        body.append('private_key', document.getElementById('private-key').files[0]);
+        const response = await fetch('/manage/api/certificate', {
+          method: 'POST',
+          headers: { 'X-Requested-With': 'docker-image-manager' },
+          body,
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+        form.reset();
+        render(payload);
+        showMessage('证书已启用，Nginx 热重载完成。');
+      } catch (error) {
+        showMessage(error.message, true);
+      } finally {
+        upload.disabled = false;
+      }
+    });
+
+    refresh().catch((error) => {
+      state.textContent = '服务不可用';
+      state.className = 'state error';
+      showMessage(error.message, true);
+      fields.forEach((field) => { document.getElementById(field).textContent = '--'; });
+    });
+  </script>
+</body>
+</html>

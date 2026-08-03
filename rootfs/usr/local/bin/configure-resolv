@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-state_file="${RESOLV_STATE_FILE:-/root/.config/docker-image/resolver.json}"
+state_file="${RESOLV_STATE_FILE:-/opt/__container/resolver.json}"
 state_value() {
     local query=$1
     [ -r "$state_file" ] && command -v jq >/dev/null 2>&1 || return 0

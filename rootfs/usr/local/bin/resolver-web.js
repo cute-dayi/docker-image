@@ -8,7 +8,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { Resolver } = require('node:dns').promises;
 
-const stateFile = process.env.RESOLV_STATE_FILE || '/root/.config/docker-image/resolver.json';
+const stateFile = process.env.RESOLV_STATE_FILE || '/opt/__container/resolver.json';
 const port = Number.parseInt(process.env.RESOLV_WEB_PORT || '8787', 10);
 const cloudflaredBin = process.env.CLOUDFLARED_BIN || 'cloudflared';
 const tunnelRuntimeDir = '/run/cloudflared';
@@ -183,7 +183,7 @@ function saveConfig(config) {
   try {
     fs.chmodSync(path.dirname(stateFile), 0o700);
   } catch {
-    // The /root volume may be mounted with a fixed mode.
+    // The state directory may be mounted with a fixed mode.
   }
   const temporary = `${stateFile}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify({ ...config, updated_at: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });

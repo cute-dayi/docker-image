@@ -65,19 +65,30 @@ if [ -e "$AUTHORIZED_KEYS" ]; then
 fi
 
 ssh-keygen -A
-mkdir -p /run/sshd /run/tailscale /run/user /var/lib/tailscale /workspace
+state_root="${CONTAINER_STATE_DIR:-/opt/__container}"
+ts_state_dir="${TS_STATE_DIR:-${state_root}/tailscale}"
+docker_data_root="${DOCKERD_DATA_ROOT:-${state_root}/docker}"
+docker_config_dir="${DOCKERD_CONFIG_DIR:-${state_root}/dockerd/config}"
+docker_cache_dir="${DOCKERD_CACHE_DIR:-${state_root}/dockerd/cache}"
+mkdir -p /run/sshd /run/tailscale /run/user /workspace \
+    "$state_root" "$ts_state_dir" "$docker_data_root" \
+    "$docker_config_dir" "$docker_cache_dir" \
+    "${NPM_CONFIG_CACHE:-${state_root}/npm}" \
+    "${UV_CACHE_DIR:-${state_root}/uv}"
 if [ -r "$AUTHORIZED_KEYS" ]; then
     install -m 600 -o root -g root "$AUTHORIZED_KEYS" "$RUNTIME_AUTHORIZED_KEYS"
 else
     install -m 600 -o root -g root /dev/null "$RUNTIME_AUTHORIZED_KEYS"
 fi
-chmod 700 /var/lib/tailscale 2>/dev/null || true
+chmod 700 "$ts_state_dir" 2>/dev/null || true
 
 if id dockerd >/dev/null 2>&1; then
     docker_uid="$(id -u dockerd)"
     install -d -m 0700 -o dockerd -g dockerd \
         "/run/user/${docker_uid}" \
-        /home/dockerd/.local/share/docker
+        "$docker_data_root" \
+        "$docker_config_dir" "$docker_cache_dir" \
+        "${XDG_DATA_HOME:-${state_root}/dockerd}"
 fi
 
 echo -e "${GREEN}[init-root] Initialization done.${NC}"

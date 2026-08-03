@@ -10,7 +10,10 @@ docker_user=dockerd
 docker_home=/home/dockerd
 docker_uid="$(id -u "$docker_user")"
 runtime_dir="/run/user/${docker_uid}"
-data_dir="${docker_home}/.local/share/docker"
+state_root="${CONTAINER_STATE_DIR:-/opt/__container}"
+data_dir="${DOCKERD_DATA_ROOT:-${state_root}/docker}"
+config_dir="${DOCKERD_CONFIG_DIR:-${state_root}/dockerd/config}"
+cache_dir="${DOCKERD_CACHE_DIR:-${state_root}/dockerd/cache}"
 
 if ! /command/s6-setuidgid "$docker_user" /usr/bin/test -w "$docker_home" \
     || ! /command/s6-setuidgid "$docker_user" /usr/bin/test -w "$runtime_dir" \
@@ -32,7 +35,11 @@ fi
 exec /command/s6-setuidgid "$docker_user" /usr/bin/env \
     HOME="$docker_home" \
     XDG_RUNTIME_DIR="$runtime_dir" \
+    XDG_CONFIG_HOME="$config_dir" \
+    XDG_CACHE_HOME="$cache_dir" \
+    XDG_DATA_HOME="${XDG_DATA_HOME:-${state_root}/dockerd}" \
     DOCKER_HOST= \
     dockerd-rootless.sh \
     --host="unix://${runtime_dir}/docker.sock" \
+    --data-root="$data_dir" \
     --storage-driver=fuse-overlayfs

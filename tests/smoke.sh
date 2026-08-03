@@ -25,7 +25,7 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     command -v /init sshd code-server uv tailscale tailscaled cloudflared nginx openssl \
         /usr/local/bin/docker-image-banner \
         /usr/local/bin/configure-resolv /usr/local/bin/resolver-web.js \
-        /usr/local/bin/dev /usr/local/bin/update-status \
+        /usr/local/bin/dev /usr/local/bin/update-status /usr/local/bin/docker-image-manager \
         docker dockerd dockerd-rootless.sh newuidmap newgidmap \
         slirp4netns fuse-overlayfs ldd \
         htop jq lsof ncdu tree dig mtr tcpdump rsync socat pstree strace \
@@ -47,10 +47,25 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
         /etc/s6-overlay/s6-rc.d/runtime-status/run \
         /etc/s6-overlay/s6-rc.d/code-server/run \
         /etc/s6-overlay/s6-rc.d/dockerd-rootless/run \
+        /etc/s6-overlay/s6-rc.d/manager/run \
         /etc/s6-overlay/s6-rc.d/nginx/run \
         /etc/s6-overlay/s6-rc.d/resolver-web/run \
         /etc/s6-overlay/s6-rc.d/tailscaled/run
     node --check /usr/local/bin/resolver-web.js
+    test "${CONTAINER_STATE_DIR}" = /opt/__container
+    test "${CODE_SERVER_USER_DATA_DIR}" = /opt/__container/code-server
+    test "${RESOLV_STATE_FILE}" = /opt/__container/resolver.json
+    test "${TS_STATE_DIR}" = /opt/__container/tailscale
+    test "${DOCKERD_DATA_ROOT}" = /opt/__container/docker
+    test "${DOCKERD_CONFIG_DIR}" = /opt/__container/dockerd/config
+    test "${DOCKERD_CACHE_DIR}" = /opt/__container/dockerd/cache
+    test "${NPM_CONFIG_CACHE}" = /opt/__container/npm
+    test "${UV_CACHE_DIR}" = /opt/__container/uv
+    test "${MANAGER_CONFIG_DIR}" = /opt/__container
+    grep -Fq -- "--user-data-dir \"\$user_data_dir\"" /etc/s6-overlay/s6-rc.d/code-server/run
+    grep -Fq '/opt/__container/resolver.json' /usr/local/bin/configure-resolv
+    grep -Fq '/opt/__container/tailscale' /etc/s6-overlay/s6-rc.d/tailscaled/run
+    grep -Fq '/opt/__container/docker' /etc/s6-overlay/s6-rc.d/dockerd-rootless/run
     resolv_test_file="$(mktemp)"
     printf 'nameserver 9.9.9.9\n' >"$resolv_test_file"
     resolv_before="$(sha256sum "$resolv_test_file")"
@@ -111,6 +126,19 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     test "$(stat -c "%a %U %G" /run/nginx/resolver.htpasswd)" = "640 root www-data"
     test -s /run/nginx/dns/index.html
     test -s /run/nginx/status/status.json
+    PASSWORD=smoke-secret \
+        NGINX_SERVER_NAMES=code.example.test \
+        NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
+        /etc/s6-overlay/scripts/configure-nginx
+    nginx -t -q -c /run/nginx/nginx.conf
+    grep -Fq "auth_basic \"Docker image\";" /run/nginx/nginx.conf
+    grep -Fq "auth_basic_user_file /run/nginx/gateway.htpasswd;" /run/nginx/nginx.conf
+    grep -Fq "location = /healthz" /run/nginx/nginx.conf
+    grep -Fq "location ^~ /manage/api/" /run/nginx/nginx.conf
+    grep -Fq "proxy_set_header Host \$http_host;" /run/nginx/nginx.conf
+    grep -Fq "auth_basic off;" /run/nginx/nginx.conf
+    ! test -e /run/nginx/resolver.htpasswd
+    test "$(stat -c "%a %U %G" /run/nginx/gateway.htpasswd)" = "640 root www-data"
     STATUS_ONCE=true \
         NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
         /usr/local/bin/update-status
@@ -214,10 +242,9 @@ original_keys="$(sha256sum "$tmpdir/authorized_keys")"
 docker run -d \
     --name "$container" \
     -e GITHUB_USER= \
-    -e CODE_SERVER_AUTH=none \
+    -e PASSWORD=smoke-secret \
     -e NGINX_SERVER_NAMES=smoke.example.test \
     -e NGINX_SERVICE_LINKS='Echo|/echo|127.0.0.1:8080' \
-    -e RESOLV_WEB_PASSWORD=smoke-secret \
     -e TS_ENABLE=false \
     -p 127.0.0.1::22 \
     -p 127.0.0.1::80 \
@@ -260,10 +287,12 @@ curl --noproxy '*' -fkS \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/healthz" >/dev/null
 portal_page="$(curl --noproxy '*' -fkS \
+    -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/services/")"
 printf '%s\n' "$portal_page" | grep -Fq 'href="/echo/"'
 curl --noproxy '*' -fkS \
+    -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/echo/healthz" >/dev/null
 redirect_headers="$(curl --noproxy '*' -skSI \
@@ -273,14 +302,24 @@ printf '%s\n' "$redirect_headers" | grep -qE '^HTTP/.* 308'
 printf '%s\n' "$redirect_headers" | grep -qi '^location: https://smoke.example.test/healthz$'
 [ "$original_keys" = "$(sha256sum "$tmpdir/authorized_keys")" ]
 status_page="$(curl --noproxy '*' -fkS \
+    -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/status/")"
 printf '%s\n' "$status_page" | grep -Fq 'Container status'
 status_json="$(curl --noproxy '*' -fkS \
+    -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/status.json")"
 printf '%s\n' "$status_json" | jq -e '.services | map(select(.name == "Echo")) | length == 1' >/dev/null
 printf '%s\n' "$status_json" | jq -e '.components.code_server == "up"' >/dev/null
+root_unauthenticated_status="$(curl --noproxy '*' -skS -o /dev/null -w '%{http_code}' \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/")"
+[ "$root_unauthenticated_status" = 401 ]
+curl --noproxy '*' -fkS \
+    -u admin:smoke-secret \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/" >/dev/null
 dns_unauthenticated_status="$(curl --noproxy '*' -skS -o /dev/null -w '%{http_code}' \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/dns/api/resolver")"
@@ -316,15 +355,43 @@ dns_apply="$(curl --noproxy '*' -fkS -X POST \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/dns/api/resolver/apply")"
 printf '%s\n' "$dns_apply" | jq -e '.applied == true' >/dev/null
-docker exec "$container" jq -e '.auto_config == false' /root/.config/docker-image/resolver.json >/dev/null
+docker exec "$container" jq -e '.auto_config == false' /opt/__container/resolver.json >/dev/null
+manager_page="$(curl --noproxy '*' -fkS \
+    -u admin:smoke-secret \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/manage/")"
+printf '%s\n' "$manager_page" | grep -Fq 'Certificate management'
+certificate_json="$(curl --noproxy '*' -fkS \
+    -u admin:smoke-secret \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/manage/api/certificate")"
+printf '%s\n' "$certificate_json" | jq -e '.source == "generated" and .upload_enabled == true' >/dev/null
+openssl req -x509 -nodes -newkey rsa:2048 -sha256 -days 30 \
+    -keyout "$tmpdir/uploaded.key" \
+    -out "$tmpdir/uploaded.crt" \
+    -subj '/CN=uploaded.example.test' \
+    -addext 'subjectAltName=DNS:uploaded.example.test' >/dev/null 2>&1
+uploaded_json="$(curl --noproxy '*' -fkS -X POST \
+    -u admin:smoke-secret \
+    -H 'X-Requested-With: docker-image-manager' \
+    -H "Origin: https://smoke.example.test:${https_port}" \
+    -F certificate=@"$tmpdir/uploaded.crt" \
+    -F private_key=@"$tmpdir/uploaded.key" \
+    --resolve "smoke.example.test:${https_port}:127.0.0.1" \
+    "https://smoke.example.test:${https_port}/manage/api/certificate")"
+printf '%s\n' "$uploaded_json" | jq -e '.source == "uploaded" and (.names | index("uploaded.example.test")) != null' >/dev/null
+docker exec "$container" test -L /opt/__container/tls/current
+docker exec "$container" test -f /opt/__container/tls/current/tls.crt
 docker exec "$container" dev status | grep -Fq 'components:'
 docker exec "$container" dev routes | grep -Fq 'Echo'
 docker exec "$container" pgrep -x sshd >/dev/null
 docker exec "$container" pgrep -f code-server >/dev/null
+docker exec "$container" pgrep -af code-server | grep -Fq -- '--auth none'
+docker exec "$container" pgrep -af code-server | grep -Fq -- '--user-data-dir /opt/__container/code-server'
 docker exec "$container" pgrep -x nginx >/dev/null
 docker exec "$container" openssl x509 \
-    -in /run/nginx/default-certificate/tls.crt -noout -ext subjectAltName \
-    | grep -q 'DNS:smoke.example.test'
+    -in /opt/__container/tls/current/tls.crt -noout -subject \
+    | grep -q 'CN = uploaded.example.test'
 ! docker exec "$container" pgrep -x dockerd >/dev/null
 [ "$(docker inspect -f '{{.RestartCount}}' "$container")" = 0 ]
 
