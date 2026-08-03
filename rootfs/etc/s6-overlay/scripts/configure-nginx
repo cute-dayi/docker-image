@@ -423,9 +423,11 @@ cat >"$status_page" <<'EOF'
 </html>
 EOF
 install -m 0644 /usr/local/share/docker-image/status.html "$status_page"
-cat >"$status_file" <<'EOF'
+if [ ! -s "$status_file" ] || ! jq -e . "$status_file" >/dev/null 2>&1; then
+    cat >"$status_file" <<'EOF'
 {"generated_at":null,"hostname":"unknown","uptime_seconds":0,"workspace_usage":"unknown","memory_used_bytes":0,"memory_total_bytes":0,"memory_usage_percent":0,"load_average":["0","0","0"],"sshfs_mounts":0,"components":{},"services":[]}
 EOF
+fi
 chmod 0644 "$status_page" "$status_file"
 
 write_dns_auth() {

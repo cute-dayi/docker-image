@@ -398,7 +398,7 @@ docker exec "$container" pgrep -af code-server \
 docker exec "$container" pgrep -x nginx >/dev/null
 docker exec "$container" openssl x509 \
     -in /opt/__container/tls/current/tls.crt -noout -subject \
-    | grep 'CN = uploaded.example.test' >/dev/null
+    | grep -F 'uploaded.example.test' >/dev/null
 ! docker exec "$container" pgrep -x dockerd >/dev/null
 [ "$(docker inspect -f '{{.RestartCount}}' "$container")" = 0 ]
 
@@ -430,7 +430,7 @@ printf '\n' | openssl s_client \
     -connect "127.0.0.1:${custom_https_port}" \
     -servername custom.example.test 2>/dev/null \
     | openssl x509 -noout -subject \
-    | grep 'CN = custom.example.test' >/dev/null
+    | grep -F 'custom.example.test' >/dev/null
 docker rm -f "$tls_container" >/dev/null
 
 # Tailscale is optional: enabling it without a TUN device must not take down SSH/code-server.
@@ -522,7 +522,12 @@ trap 'rm -rf "$context"' EXIT
 
 mkdir -p "$context/rootfs"
 cp --parents /usr/bin/true "$context/rootfs"
-ldd /usr/bin/true | awk '/=> \// { print $3 } /^\// { print $1 }' | while IFS= read -r library; do
+ldd /usr/bin/true \
+    | sed -nE \
+        -e 's/^[[:space:]]*(\/[^[:space:]]+).*/\1/p' \
+        -e 's/.*=>[[:space:]]*(\/[^[:space:]]+).*/\1/p' \
+    | sort -u \
+    | while IFS= read -r library; do
     cp --parents "$library" "$context/rootfs"
 done
 

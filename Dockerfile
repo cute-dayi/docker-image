@@ -167,6 +167,7 @@ COPY rootfs/ /
 COPY --from=manager-builder /out/docker-image-manager /usr/local/bin/docker-image-manager
 
 RUN set -eux; \
+    find /etc /usr -type d -exec chmod 755 {} +; \
     chmod +x \
       /etc/s6-overlay/scripts/init-root \
       /etc/s6-overlay/scripts/configure-nginx \
