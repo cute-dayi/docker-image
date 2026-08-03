@@ -20,7 +20,7 @@ assert_config() {
     }
 }
 
-docker run --rm --entrypoint /bin/bash "$image" -c '
+docker run --rm -i --entrypoint /bin/bash "$image" -se <<'IMAGE_SMOKE'
     set -e
     command -v /init sshd code-server uv tailscale tailscaled cloudflared nginx openssl \
         /usr/local/bin/docker-image-banner \
@@ -33,7 +33,7 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
         node npm npx >/dev/null
     test -x /usr/bin/true
     command -v docker-rootlesskit >/dev/null || command -v rootlesskit >/dev/null
-    getent passwd dockerd | grep -q "^dockerd:x:1000:1000:"
+    getent passwd dockerd | grep "^dockerd:x:1000:1000:" >/dev/null
     grep -qx "dockerd:100000:65536" /etc/subuid
     grep -qx "dockerd:100000:65536" /etc/subgid
     docker buildx version >/dev/null
@@ -93,12 +93,12 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
         NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
         RESOLV_WEB_PASSWORD=smoke-secret \
         /usr/local/bin/docker-image-banner)"
-    printf '%s\n' "$banner" | grep -Fq 'DOCKER IMAGE'
-    printf '%s\n' "$banner" | grep -Fq 'https://code.example.test:443/services/'
-    printf '%s\n' "$banner" | grep -Fq 'https://code.example.test:443/dns/'
-    /usr/local/bin/docker-image-banner | grep -Fq 'DNS       disabled'
+    grep -Fq 'DOCKER IMAGE' <<<"$banner"
+    grep -Fq 'https://code.example.test:443/services/' <<<"$banner"
+    grep -Fq 'https://code.example.test:443/dns/' <<<"$banner"
+    /usr/local/bin/docker-image-banner | grep -F 'DNS       disabled' >/dev/null
     [ -z "$(STARTUP_BANNER=false /usr/local/bin/docker-image-banner)" ]
-    /usr/local/bin/dev help | grep -Fq 'status'
+    /usr/local/bin/dev help | grep -F 'status' >/dev/null
     NGINX_SERVER_NAMES=code.example.test \
         NGINX_SERVICE_LINKS="Echo|/echo|127.0.0.1:8080" \
         /etc/s6-overlay/scripts/configure-nginx
@@ -115,7 +115,7 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
         /etc/s6-overlay/scripts/configure-nginx
     nginx -t -q -c /run/nginx/nginx.conf
     openssl x509 -in /run/nginx/default-certificate/tls.crt -noout -ext subjectAltName \
-        | grep -q "DNS:code.example.test"
+        | grep "DNS:code.example.test" >/dev/null
     grep -Fq "location ^~ /echo/" /run/nginx/nginx.conf
     grep -Fq "proxy_pass http://127.0.0.1:8080/;" /run/nginx/nginx.conf
     grep -Fq "href=\"/echo/\"" /run/nginx/services/index.html
@@ -147,7 +147,7 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
         /usr/local/bin/update-status
     jq -e ".services | length == 2" \
         /run/nginx/status/status.json >/dev/null
-    /usr/local/bin/dev routes | grep -Fq 'Echo'
+    /usr/local/bin/dev routes | grep -F 'Echo' >/dev/null
 
     tunnel_test_dir="$(mktemp -d)"
     printf "%s\n" \
@@ -226,7 +226,7 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
         exit 1
     fi
     sshd -t
-'
+IMAGE_SMOKE
 docker run --rm --entrypoint /usr/sbin/sshd "$image" -T >"$tmpdir/sshd-config"
 assert_config '^clientaliveinterval 60$'
 assert_config '^clientalivecountmax 3$'
@@ -273,12 +273,12 @@ ssh -i "$tmpdir/id_ed25519" -p "$ssh_port" \
     root@127.0.0.1 'test "$(ps -p 1 -o comm=)" = s6-svscan'
 
 for _ in {1..30}; do
-    if docker logs "$container" 2>&1 | grep -Fq 'DOCKER IMAGE'; then
+    if docker logs "$container" 2>&1 | grep -F 'DOCKER IMAGE' >/dev/null; then
         break
     fi
     sleep 1
 done
-docker logs "$container" 2>&1 | grep -Fq 'DOCKER IMAGE'
+docker logs "$container" 2>&1 | grep -F 'DOCKER IMAGE' >/dev/null
 
 for _ in {1..30}; do
     curl --noproxy '*' -fkS \
@@ -293,7 +293,7 @@ portal_page="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/services/")"
-printf '%s\n' "$portal_page" | grep -Fq 'href="/echo/"'
+grep -Fq 'href="/echo/"' <<<"$portal_page"
 curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
@@ -301,14 +301,14 @@ curl --noproxy '*' -fkS \
 redirect_headers="$(curl --noproxy '*' -skSI \
     --resolve "smoke.example.test:${http_port}:127.0.0.1" \
     "http://smoke.example.test:${http_port}/healthz" | tr -d '\r')"
-printf '%s\n' "$redirect_headers" | grep -qE '^HTTP/.* 308'
-printf '%s\n' "$redirect_headers" | grep -qi '^location: https://smoke.example.test/healthz$'
+grep -qE '^HTTP/.* 308' <<<"$redirect_headers"
+grep -qi '^location: https://smoke.example.test/healthz$' <<<"$redirect_headers"
 [ "$original_keys" = "$(sha256sum "$tmpdir/authorized_keys")" ]
 status_page="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/status/")"
-printf '%s\n' "$status_page" | grep -Fq 'Container status'
+grep -Fq 'Container status' <<<"$status_page"
 status_json="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
@@ -331,9 +331,9 @@ dns_page="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/dns/")"
-printf '%s\n' "$dns_page" | grep -Fq 'id="resolver-form"'
-printf '%s\n' "$dns_page" | grep -Fq 'https://try.cloudflare.com/'
-printf '%s\n' "$dns_page" | grep -Fq 'id="tunnel-start"'
+grep -Fq 'id="resolver-form"' <<<"$dns_page"
+grep -Fq 'https://try.cloudflare.com/' <<<"$dns_page"
+grep -Fq 'id="tunnel-start"' <<<"$dns_page"
 dns_json="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
@@ -363,7 +363,7 @@ manager_page="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
     "https://smoke.example.test:${https_port}/manage/")"
-printf '%s\n' "$manager_page" | grep -Fq 'Certificate management'
+grep -Fq 'Certificate management' <<<"$manager_page"
 certificate_json="$(curl --noproxy '*' -fkS \
     -u admin:smoke-secret \
     --resolve "smoke.example.test:${https_port}:127.0.0.1" \
@@ -385,16 +385,17 @@ uploaded_json="$(curl --noproxy '*' -fkS -X POST \
 printf '%s\n' "$uploaded_json" | jq -e '.source == "uploaded" and (.names | index("uploaded.example.test")) != null' >/dev/null
 docker exec "$container" test -L /opt/__container/tls/current
 docker exec "$container" test -f /opt/__container/tls/current/tls.crt
-docker exec "$container" dev status | grep -Fq 'components:'
-docker exec "$container" dev routes | grep -Fq 'Echo'
+docker exec "$container" dev status | grep -F 'components:' >/dev/null
+docker exec "$container" dev routes | grep -F 'Echo' >/dev/null
 docker exec "$container" pgrep -x sshd >/dev/null
 docker exec "$container" pgrep -f code-server >/dev/null
-docker exec "$container" pgrep -af code-server | grep -Fq -- '--auth none'
-docker exec "$container" pgrep -af code-server | grep -Fq -- '--user-data-dir /opt/__container/code-server'
+docker exec "$container" pgrep -af code-server | grep -F -- '--auth none' >/dev/null
+docker exec "$container" pgrep -af code-server \
+    | grep -F -- '--user-data-dir /opt/__container/code-server' >/dev/null
 docker exec "$container" pgrep -x nginx >/dev/null
 docker exec "$container" openssl x509 \
     -in /opt/__container/tls/current/tls.crt -noout -subject \
-    | grep -q 'CN = uploaded.example.test'
+    | grep 'CN = uploaded.example.test' >/dev/null
 ! docker exec "$container" pgrep -x dockerd >/dev/null
 [ "$(docker inspect -f '{{.RestartCount}}' "$container")" = 0 ]
 
@@ -426,7 +427,7 @@ printf '\n' | openssl s_client \
     -connect "127.0.0.1:${custom_https_port}" \
     -servername custom.example.test 2>/dev/null \
     | openssl x509 -noout -subject \
-    | grep -q 'CN = custom.example.test'
+    | grep 'CN = custom.example.test' >/dev/null
 docker rm -f "$tls_container" >/dev/null
 
 # Tailscale is optional: enabling it without a TUN device must not take down SSH/code-server.
@@ -440,7 +441,7 @@ docker run -d \
 sleep 3
 docker exec "$container" pgrep -x sshd >/dev/null
 docker exec "$container" pgrep -f code-server >/dev/null
-docker logs "$container" 2>&1 | grep -q '/dev/net/tun is unavailable'
+docker logs "$container" 2>&1 | grep '/dev/net/tun is unavailable' >/dev/null
 [ "$(docker inspect -f '{{.State.Running}}' "$container")" = true ]
 
 # When the runner exposes TUN, also exercise the enabled daemon path without
@@ -496,7 +497,8 @@ if [ "$rootless_capable" -eq 1 ]; then
         "$image" >/dev/null
     rootless_ready=0
     for _ in {1..60}; do
-        if docker exec "$container" docker info --format '{{json .SecurityOptions}}' 2>/dev/null | grep -q rootless; then
+        if docker exec "$container" docker info --format '{{json .SecurityOptions}}' 2>/dev/null \
+            | grep rootless >/dev/null; then
             rootless_ready=1
             break
         fi
@@ -507,7 +509,8 @@ if [ "$rootless_capable" -eq 1 ]; then
         exit 1
     fi
     docker exec "$container" test -S /run/user/1000/docker.sock
-    docker exec "$container" docker info --format '{{json .SecurityOptions}}' | grep -q rootless
+    docker exec "$container" docker info --format '{{json .SecurityOptions}}' \
+        | grep rootless >/dev/null
     docker exec "$container" bash -c 'test "$(ps -C dockerd -o user= | tr -d " ")" = dockerd'
     docker exec -i "$container" /bin/bash -se <<'INNER_DOCKER_SMOKE'
 set -o pipefail
