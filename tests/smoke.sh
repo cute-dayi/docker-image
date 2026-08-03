@@ -65,7 +65,10 @@ docker run --rm --entrypoint /bin/bash "$image" -c '
     grep -Fq -- "--user-data-dir \"\$user_data_dir\"" /etc/s6-overlay/s6-rc.d/code-server/run
     grep -Fq '/opt/__container/resolver.json' /usr/local/bin/configure-resolv
     grep -Fq '/opt/__container/tailscale' /etc/s6-overlay/s6-rc.d/tailscaled/run
-    grep -Fq '/opt/__container/docker' /etc/s6-overlay/s6-rc.d/dockerd-rootless/run
+    grep -Fq 'data_dir="${DOCKERD_DATA_ROOT:-${state_root}/docker}"' \
+        /etc/s6-overlay/s6-rc.d/dockerd-rootless/run
+    grep -Fq -- '--data-root="$data_dir"' \
+        /etc/s6-overlay/s6-rc.d/dockerd-rootless/run
     resolv_test_file="$(mktemp)"
     printf 'nameserver 9.9.9.9\n' >"$resolv_test_file"
     resolv_before="$(sha256sum "$resolv_test_file")"
