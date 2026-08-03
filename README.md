@@ -112,6 +112,26 @@ services:
 
 共享网络模式下，端口必须映射在拥有网络命名空间的 Mihomo 服务上。镜像中的 code-server 默认只监听回环地址，因此原来的 `49184:8080` 无法从宿主机访问；请映射 `49184:443`，然后使用 `https://<宿主机>:49184/`。
 
+### 完整 Mihomo Compose
+
+仓库中的 [`compose.mihomo.yml`](compose.mihomo.yml) 是与 Mihomo 共享网络命名空间的完整示例，包含 GPU、rootless Docker-in-Docker、Tailscale、DNS 管理、统一 HTTPS、状态页、动态服务入口和持久化目录。配套变量模板位于 [`compose.mihomo.env.example`](compose.mihomo.env.example)。
+
+```bash
+cp compose.mihomo.env.example .env
+# 编辑 .env，至少填写 OVO_PASSWORD；需要自动登录 Tailscale 时填写 TS_AUTHKEY
+mkdir -p container_data/mihomo container_data/ovo/state \
+  container_data/ovo/workspace container_data/hf_data
+# 将 Mihomo 配置保存为 container_data/mihomo/config.yaml
+docker compose -f compose.mihomo.yml config
+docker compose -f compose.mihomo.yml up -d
+```
+
+默认访问地址为：SSH `49123`、HTTP `49183`、HTTPS `49184`、Mihomo mixed proxy `127.0.0.1:47891`、Mihomo controller `127.0.0.1:49092`。Web 入口使用 `admin` 和 `.env` 中的 `OVO_PASSWORD` 登录一次即可访问 code-server、`/services/`、`/status/`、`/dns/` 与 `/manage/`。Mihomo 代理和 controller 默认只绑定宿主机回环地址；`/services/` 中还提供受统一认证保护的 `/mihomo/` 反代入口。需要向局域网开放代理时，再将 `MIHOMO_PROXY_BIND_IP` 改为 `0.0.0.0`。
+
+示例只将 `/opt/__container`、`/workspace` 和数据集目录持久化，不会整目录覆盖 `/root`、`/opt` 或 `/home`。默认不挂载外部证书，因此可以直接在 `/manage/` 上传证书并持久化到 `/opt/__container/tls`；需要由宿主机管理证书时，再启用 Compose 中注释的 `/etc/nginx/certs:ro` 挂载。
+
+该示例为 rootless DIND 设置了 `privileged: true`，这是外层容器的运行要求；内层 `dockerd` 仍以 UID 1000 运行。若宿主机没有 NVIDIA runtime，请删除 `deploy.resources.reservations.devices` 和两个 `NVIDIA_*` 环境变量。不要为 ovo 服务添加 `init: true`。
+
 ## 镜像地址
 
 ```text

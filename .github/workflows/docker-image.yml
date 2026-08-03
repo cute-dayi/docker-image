@@ -23,6 +23,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Validate Mihomo Compose example
+        env:
+          OVO_PASSWORD: compose-validation-only
+        run: docker compose --env-file compose.mihomo.env.example -f compose.mihomo.yml config --quiet
+
       - name: Build test image
         uses: docker/build-push-action@v6
         with:

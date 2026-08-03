@@ -1,0 +1,123 @@
+name: ${COMPOSE_PROJECT_NAME:-ovo-mihomo}
+
+services:
+  mihomo-px-2-898989:
+    image: ${MIHOMO_IMAGE:-proxy-docker-hub.lty520.faith/metacubex/mihomo:latest}
+    container_name: ${MIHOMO_CONTAINER_NAME:-mihomo-px-2-898989}
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      # Mihomo mixed proxy and controller.
+      - "${MIHOMO_PROXY_BIND_IP:-127.0.0.1}:${MIHOMO_PROXY_PORT:-47891}:7890/tcp"
+      - "${MIHOMO_PROXY_BIND_IP:-127.0.0.1}:${MIHOMO_PROXY_PORT:-47891}:7890/udp"
+      - "${MIHOMO_CONTROLLER_BIND_IP:-127.0.0.1}:${MIHOMO_CONTROLLER_PORT:-49092}:9090/tcp"
+
+      # ovo shares this network namespace, so its ports must be published here.
+      - "${OVO_BIND_IP:-0.0.0.0}:${OVO_SSH_PORT:-49123}:22/tcp"
+      - "${OVO_BIND_IP:-0.0.0.0}:${OVO_HTTP_PORT:-49183}:80/tcp"
+      - "${OVO_BIND_IP:-0.0.0.0}:${OVO_HTTPS_PORT:-49184}:443/tcp"
+    volumes:
+      - ${MIHOMO_CONFIG_DIR:-./container_data/mihomo}:/root/.config/mihomo
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "3"
+
+  ovo_bo2_0_1:
+    image: ${OVO_IMAGE:-ghcr.io/rabbit-dayi/docker-image:latest}
+    container_name: ${OVO_CONTAINER_NAME:-ovo_bo2_0_1_128}
+    network_mode: "service:mihomo-px-2-898989"
+    depends_on:
+      - mihomo-px-2-898989
+    restart: unless-stopped
+
+    # Required by the outer container for the inner rootless Docker daemon.
+    # s6-overlay already runs as PID 1, so do not add init: true.
+    privileged: true
+
+    environment:
+      DAYI_FLAG: ${DAYI_FLAG:-}
+      GITHUB_USER: ${GITHUB_USER:-rabbit-dayi}
+      PASSWORD: ${OVO_PASSWORD:?set OVO_PASSWORD in .env}
+
+      TZ: ${TZ:-Asia/Shanghai}
+      UV_LINK_MODE: symlink
+      UV_COMPILE_BYTECODE: "1"
+
+      # One authenticated HTTPS entrypoint for code-server and all management pages.
+      NGINX_ENABLE: "true"
+      NGINX_UNIFIED_AUTH: "true"
+      NGINX_SERVER_NAMES: ${OVO_DOMAIN:-_}
+      NGINX_SERVICE_LINKS: ${OVO_SERVICE_LINKS:-Mihomo|/mihomo|127.0.0.1:9090}
+      MANAGER_ENABLE: "true"
+      STARTUP_BANNER: "true"
+
+      # Detect Mihomo DNS first, retain Docker DNS, then optionally add 1.1.1.1.
+      RESOLV_AUTO_CONFIG: "true"
+      RESOLV_LOCAL_NAMESERVER: ${RESOLV_LOCAL_NAMESERVER:-127.0.0.1}
+      RESOLV_FALLBACK_NAMESERVER: ${RESOLV_FALLBACK_NAMESERVER:-1.1.1.1}
+      RESOLV_FALLBACK_ALWAYS: ${RESOLV_FALLBACK_ALWAYS:-false}
+      RESOLV_CHECK_DOMAIN: ${RESOLV_CHECK_DOMAIN:-example.com}
+
+      # Tailscale is independent from Mihomo but uses the same network namespace.
+      TS_ENABLE: ${TS_ENABLE:-true}
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_AUTH_ONCE: "true"
+      TS_HOSTNAME: ${TS_HOSTNAME:-ovo-bo2-0-1}
+      TS_ACCEPT_DNS: "false"
+      TS_ADVERTISE_TAGS: ${TS_ADVERTISE_TAGS:-}
+
+      # The daemon runs as UID 1000 inside this privileged outer container.
+      DOCKERD_ROOTLESS_ENABLE: "true"
+
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+
+    volumes:
+      # All application state, certificates, caches, Tailscale identity, and DIND data.
+      - ${OVO_STATE_DIR:-./container_data/ovo/state}:/opt/__container
+      - ${OVO_WORKSPACE_DIR:-./container_data/ovo/workspace}:/workspace
+      - ${HF_DATA_DIR:-./container_data/hf_data}:/data
+
+      # Optional externally managed TLS certificate pair: tls.crt and tls.key.
+      # Leave this disabled to upload and manage certificates through /manage/.
+      # - ${OVO_CERTS_DIR:-./container_data/ovo/certs}:/etc/nginx/certs:ro
+
+      # Optional fixed SSH keys. Set GITHUB_USER empty when enabling this mount.
+      # - ${AUTHORIZED_KEYS_FILE:-./container_data/authorized_keys}:/root/.ssh/authorized_keys:ro
+
+    shm_size: ${OVO_SHM_SIZE:-64gb}
+    ulimits:
+      memlock: -1
+      stack: 67108864
+      nofile:
+        soft: 524288
+        hard: 524288
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --noproxy '*' -kfsS https://127.0.0.1/healthz >/dev/null || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "3"
